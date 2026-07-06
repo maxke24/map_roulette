@@ -77,11 +77,15 @@ import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
 import com.jellemax.maproulette.tracking.TripTrackingService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
@@ -109,6 +113,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     var destination by remember { mutableStateOf<LatLon?>(null) }
     var route by remember { mutableStateOf<List<LatLon>?>(null) }
     var spinning by remember { mutableStateOf(false) }
+    var spinJob by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
 
@@ -229,7 +234,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             fetchLocation()
             return
         }
-        scope.launch {
+        spinJob = scope.launch {
             spinning = true
             error = null
             try {
@@ -244,8 +249,10 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         true,
                     )
                 } else {
-                    val dest = withContext(Dispatchers.IO) {
-                        RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0, mode.highwayRegex)
+                    val dest = withTimeout(30_000) {
+                        withContext(Dispatchers.IO) {
+                            RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0, mode.highwayRegex)
+                        }
                     }
                     destination = dest
                     route = null
@@ -256,6 +263,10 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         true,
                     )
                 }
+            } catch (e: TimeoutCancellationException) {
+                error = "Road servers are slow right now — try again"
+            } catch (e: CancellationException) {
+                throw e // user cancelled or screen left; finally still resets state
             } catch (e: Exception) {
                 error = e.message ?: "Failed to find a road"
             } finally {
@@ -338,8 +349,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     )
 
                     Button(
-                        onClick = ::spin,
-                        enabled = !spinning,
+                        onClick = { if (spinning) spinJob?.cancel() else spin() },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
@@ -351,7 +361,11 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                 Modifier.size(20.dp))
                         }
                         Spacer(Modifier.width(10.dp))
-                        Text("Spin", style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                        Text(
+                            if (spinning) "Cancel" else "Spin",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                        )
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -6,12 +6,14 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.random.Random
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeout
 
 /**
  * Junction-aware curviness scoring.
@@ -93,21 +95,29 @@ object RoundTripPlanner {
     private const val MIN_CURVY_SCORE = 0.12
 
     suspend fun plan(center: LatLon, radiusMeters: Double, highwayRegex: String): List<LatLon> =
-        coroutineScope {
-            val startAngle = Random.nextDouble(2 * PI)
-            val overpassLimit = Semaphore(2) // be polite to the public API
-            val waypoints = (0 until SECTORS).map { s ->
-                async(Dispatchers.IO) {
-                    overpassLimit.withPermit {
-                        sectorWaypoint(center, radiusMeters,
-                            startAngle + s * 2 * PI / SECTORS, highwayRegex)
+        withTimeout(45_000) {
+            coroutineScope {
+                val startAngle = Random.nextDouble(2 * PI)
+                val overpassLimit = Semaphore(2) // be polite to the public API
+                val waypoints = (0 until SECTORS).map { s ->
+                    async(Dispatchers.IO) {
+                        overpassLimit.withPermit {
+                            // Any single-sector failure just skips that sector.
+                            try {
+                                sectorWaypoint(center, radiusMeters,
+                                    startAngle + s * 2 * PI / SECTORS, highwayRegex, s)
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                null
+                            }
+                        }
                     }
+                }.awaitAll().filterNotNull()
+                if (waypoints.size < MIN_WAYPOINTS) {
+                    throw IOException("Not enough roads for a round trip — try a larger radius")
                 }
-            }.awaitAll().filterNotNull()
-            if (waypoints.size < MIN_WAYPOINTS) {
-                throw IOException("Not enough roads for a round trip — try a larger radius")
+                waypoints
             }
-            waypoints
         }
 
     private fun sectorWaypoint(
@@ -115,6 +125,7 @@ object RoundTripPlanner {
         radiusMeters: Double,
         sectorAngle: Double,
         highwayRegex: String,
+        sectorIndex: Int,
     ): LatLon? {
         // Jitter within the sector; aim for a ring at 50–85% of the radius so
         // the loop stays inside the circle.
@@ -124,7 +135,7 @@ object RoundTripPlanner {
 
         for (searchRadius in listOf(2_000.0, 5_000.0)) {
             val ways = try {
-                RoadRoulette.fetchRoads(sample, searchRadius, highwayRegex)
+                RoadRoulette.fetchRoads(sample, searchRadius, highwayRegex, sectorIndex)
             } catch (e: IOException) {
                 continue
             }

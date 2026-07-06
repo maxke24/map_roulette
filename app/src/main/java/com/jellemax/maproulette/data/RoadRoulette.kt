@@ -107,6 +107,7 @@ object RoadRoulette {
         center: LatLon,
         radiusMeters: Double,
         highwayRegex: String,
+        endpointOffset: Int = 0,
     ): List<OverpassWay> {
         val query = """
             [out:json][timeout:10];
@@ -115,7 +116,9 @@ object RoadRoulette {
         """.trimIndent()
 
         var lastError: IOException? = null
-        for (endpoint in ENDPOINTS) {
+        // Rotate the endpoint order per caller to spread load across mirrors.
+        for (i in ENDPOINTS.indices) {
+            val endpoint = ENDPOINTS[(i + endpointOffset) % ENDPOINTS.size]
             try {
                 return parseWays(post(endpoint, query))
             } catch (e: IOException) {
@@ -129,8 +132,8 @@ object RoadRoulette {
         val conn = URL(endpoint).openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
-            conn.connectTimeout = 8_000
-            conn.readTimeout = 15_000
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 12_000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             conn.setRequestProperty("Accept-Encoding", "gzip")
