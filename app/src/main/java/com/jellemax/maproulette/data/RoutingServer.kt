@@ -74,6 +74,30 @@ object RoutingServer {
         distanceMeters: Double,
         seed: Long,
     ): RouteResult {
+        // Long loops can point past the graph's map edge or into road-sparse
+        // areas ("could not find a valid point"). Shrink and reroll direction
+        // until routable; the UI reports the real loop length.
+        var dist = distanceMeters
+        var s = seed
+        var lastError: IOException? = null
+        repeat(4) {
+            try {
+                return requestRoundTrip(config, start, dist, s)
+            } catch (e: IOException) {
+                lastError = e
+                dist *= 0.75
+                s = kotlin.random.Random.nextLong()
+            }
+        }
+        throw lastError ?: IOException("Round trip failed")
+    }
+
+    private fun requestRoundTrip(
+        config: ServerConfig,
+        start: LatLon,
+        distanceMeters: Double,
+        seed: Long,
+    ): RouteResult {
         val url = config.url.trimEnd('/') +
             "/route?profile=moto" +
             "&point=${start.lat},${start.lon}" +
