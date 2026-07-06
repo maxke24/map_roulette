@@ -87,6 +87,7 @@ object RoutingServer {
             conn.connectTimeout = 5_000
             conn.readTimeout = 20_000
             conn.setRequestProperty("Accept-Encoding", "gzip")
+            conn.setRequestProperty("User-Agent", "MapRoulette/1.4")
             if (config.clientId.isNotBlank()) {
                 conn.setRequestProperty("CF-Access-Client-Id", config.clientId)
                 conn.setRequestProperty("CF-Access-Client-Secret", config.clientSecret)
@@ -119,6 +120,60 @@ object RoutingServer {
             waypoints = sampleInterior(polyline, 8),
             distanceMeters = path.optDouble("distance").takeIf { !it.isNaN() },
         )
+    }
+
+    /**
+     * Random road destination via the server: pick a random coordinate in the
+     * circle and let GraphHopper snap it to the nearest routable road. Retries
+     * a few times if the snap lands far outside the circle (water, forests).
+     */
+    fun randomRoadDestination(
+        config: ServerConfig,
+        center: LatLon,
+        radiusMeters: Double,
+    ): LatLon {
+        var best: LatLon? = null
+        repeat(3) {
+            val target = RoadRoulette.randomPointInCircle(center, radiusMeters)
+            val snapped = snapToRoad(config, center, target) ?: return@repeat
+            if (RoadRoulette.distanceMeters(center, snapped) <= radiusMeters * 1.15) {
+                return snapped
+            }
+            best = snapped
+        }
+        return best ?: throw IOException("Routing server could not find a road")
+    }
+
+    private fun snapToRoad(config: ServerConfig, from: LatLon, to: LatLon): LatLon? {
+        val url = config.url.trimEnd('/') +
+            "/route?profile=moto" +
+            "&point=${from.lat},${from.lon}" +
+            "&point=${to.lat},${to.lon}" +
+            "&points_encoded=false"
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 15_000
+            conn.setRequestProperty("Accept-Encoding", "gzip")
+            conn.setRequestProperty("User-Agent", "MapRoulette/1.4")
+            if (config.clientId.isNotBlank()) {
+                conn.setRequestProperty("CF-Access-Client-Id", config.clientId)
+                conn.setRequestProperty("CF-Access-Client-Secret", config.clientSecret)
+            }
+            if (conn.responseCode != 200) return null // unroutable target: caller retries
+            val stream = if (conn.contentEncoding == "gzip") {
+                GZIPInputStream(conn.inputStream)
+            } else {
+                conn.inputStream
+            }
+            val body = stream.bufferedReader().readText()
+            val snapped = JSONObject(body).getJSONArray("paths").getJSONObject(0)
+                .getJSONObject("snapped_waypoints").getJSONArray("coordinates")
+            val last = snapped.getJSONArray(snapped.length() - 1) // [lon, lat]
+            return LatLon(last.getDouble(1), last.getDouble(0))
+        } finally {
+            conn.disconnect()
+        }
     }
 
     /** [count] evenly spaced interior points, excluding start and end. */

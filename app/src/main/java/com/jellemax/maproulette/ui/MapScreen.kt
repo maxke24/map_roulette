@@ -286,7 +286,23 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                 } else {
                     val dest = withTimeout(30_000) {
                         withContext(Dispatchers.IO) {
-                            RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0, mode.highwayRegex)
+                            // Car can use the own server (snap random point to road,
+                            // reachability guaranteed); walk/bike need path/footway
+                            // data the server doesn't import, so Overpass only.
+                            var d: LatLon? = null
+                            if (mode == TravelMode.CAR && serverConfig.usable) {
+                                d = try {
+                                    RoutingServer.randomRoadDestination(
+                                        serverConfig, loc, radiusKm * 1000.0)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    serverError = e.message
+                                    null
+                                }
+                            }
+                            d ?: RoadRoulette.randomRoadPoint(
+                                loc, radiusKm * 1000.0, mode.highwayRegex)
                         }
                     }
                     destination = dest

@@ -59,7 +59,7 @@ object RoadRoulette {
     }
 
     /** Uniform-by-area random point inside the circle. */
-    private fun randomPointInCircle(center: LatLon, radiusMeters: Double): LatLon =
+    fun randomPointInCircle(center: LatLon, radiusMeters: Double): LatLon =
         offset(center, radiusMeters * sqrt(Random.nextDouble()), Random.nextDouble(2 * PI))
 
     /** Point at [distanceMeters] from [center] in direction [bearingRad]. */
@@ -137,6 +137,8 @@ object RoadRoulette {
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             conn.setRequestProperty("Accept-Encoding", "gzip")
+            // Overpass usage policy asks for an identifying user agent.
+            conn.setRequestProperty("User-Agent", "MapRoulette/1.4 (personal Android app)")
             conn.outputStream.use {
                 it.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
             }
