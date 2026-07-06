@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.jellemax.maproulette.BuildConfig
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
@@ -242,13 +243,13 @@ fun MapScreen(onOpenHistory: () -> Unit) {
         spinJob = scope.launch {
             spinning = true
             error = null
+            var serverError: String? = null
             try {
                 if (mode.roundTrip) {
                     // Prefer the self-hosted routing server (single fast request,
                     // real road-following loop); fall back to Overpass sampling.
                     val tripMeters = radiusKm * 1000.0
                     var result: RouteResult? = null
-                    var serverError: String? = null
                     if (serverConfig.usable) {
                         result = try {
                             withContext(Dispatchers.IO) {
@@ -298,7 +299,14 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     )
                 }
             } catch (e: TimeoutCancellationException) {
-                error = "Road servers are slow right now — try again"
+                // Don't let a fallback timeout hide why the own server failed.
+                error = serverError
+                    ?.let { "Server route failed ($it); fallback timed out too" }
+                    ?: if (mode.roundTrip && !serverConfig.usable) {
+                        "No routing server configured — public servers timed out"
+                    } else {
+                        "Road servers are slow right now — try again"
+                    }
             } catch (e: CancellationException) {
                 throw e // user cancelled or screen left; finally still resets state
             } catch (e: Exception) {
@@ -486,6 +494,12 @@ private fun ServerSettingsDialog(
         title = { Text("Routing server") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "App v${BuildConfig.VERSION_NAME} · active: " +
+                        if (config.usable) config.url else "none (public fallback)",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                )
                 Text(
                     "Self-hosted GraphHopper for Moto round trips. " +
                         "Falls back to public servers when unreachable.",
