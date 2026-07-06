@@ -31,8 +31,10 @@ import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TwoWheeler
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -43,6 +45,9 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.Slider
@@ -74,6 +79,9 @@ import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.RoundTripPlanner
+import com.jellemax.maproulette.data.RouteResult
+import com.jellemax.maproulette.data.RoutingServer
+import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
 import com.jellemax.maproulette.tracking.TripTrackingService
@@ -90,6 +98,7 @@ import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
+import kotlin.random.Random
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
@@ -111,10 +120,12 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     var radiusKm by rememberSaveable { mutableFloatStateOf(TravelMode.CAR.defaultKm) }
     var myLocation by remember { mutableStateOf<LatLon?>(null) }
     var destination by remember { mutableStateOf<LatLon?>(null) }
-    var route by remember { mutableStateOf<List<LatLon>?>(null) }
+    var route by remember { mutableStateOf<RouteResult?>(null) }
     var spinning by remember { mutableStateOf(false) }
     var spinJob by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var serverConfig by remember { mutableStateOf(RoutingServer.load(context)) }
+    var showSettings by remember { mutableStateOf(false) }
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
 
     val mapView = remember {
@@ -182,13 +193,17 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     }
 
     // Redraw overlays whenever location, radius, destination, or route changes.
-    LaunchedEffect(myLocation, destination, route, radiusKm) {
+    LaunchedEffect(myLocation, destination, route, radiusKm, mode) {
         mapView.overlays.clear()
         val loc = myLocation
         if (loc != null) {
             val center = GeoPoint(loc.lat, loc.lon)
             mapView.overlays.add(Polygon(mapView).apply {
-                points = Polygon.pointsAsCircle(center, radiusKm * 1000.0)
+                // For round trips the slider is trip length; reach ≈ length / 4.
+                points = Polygon.pointsAsCircle(
+                    center,
+                    if (mode.roundTrip) radiusKm * 250.0 else radiusKm * 1000.0,
+                )
                 outlinePaint.color = AndroidColor.argb(180, 33, 150, 243)
                 outlinePaint.strokeWidth = 3f
                 fillPaint.color = AndroidColor.argb(24, 33, 150, 243)
@@ -208,22 +223,12 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             })
         }
         val loop = route
-        if (loop != null && loc != null) {
-            // Indicative loop: straight lines between waypoints, not the route.
+        if (loop != null) {
             mapView.overlays.add(Polyline(mapView).apply {
-                setPoints(
-                    (listOf(loc) + loop + loc).map { GeoPoint(it.lat, it.lon) }
-                )
+                setPoints(loop.polyline.map { GeoPoint(it.lat, it.lon) })
                 outlinePaint.color = AndroidColor.argb(160, 233, 30, 99)
-                outlinePaint.strokeWidth = 5f
+                outlinePaint.strokeWidth = 6f
             })
-            loop.forEachIndexed { i, wp ->
-                mapView.overlays.add(Marker(mapView).apply {
-                    position = GeoPoint(wp.lat, wp.lon)
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                    title = "Stop ${i + 1}"
-                })
-            }
         }
         mapView.invalidate()
     }
@@ -239,12 +244,36 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             error = null
             try {
                 if (mode.roundTrip) {
-                    val loop = RoundTripPlanner.plan(loc, radiusKm * 1000.0, mode.highwayRegex)
-                    route = loop
+                    // Prefer the self-hosted routing server (single fast request,
+                    // real road-following loop); fall back to Overpass sampling.
+                    val tripMeters = radiusKm * 1000.0
+                    var result: RouteResult? = null
+                    if (serverConfig.usable) {
+                        result = try {
+                            withContext(Dispatchers.IO) {
+                                RoutingServer.roundTrip(
+                                    serverConfig, loc, tripMeters, Random.nextLong())
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            null // server down/misconfigured: try Overpass below
+                        }
+                    }
+                    if (result == null) {
+                        val wps = RoundTripPlanner.plan(
+                            loc, tripMeters / 4.0, mode.highwayRegex)
+                        result = RouteResult(
+                            polyline = listOf(loc) + wps + loc,
+                            waypoints = wps,
+                            distanceMeters = null,
+                        )
+                    }
+                    route = result
                     destination = null
                     mapView.zoomToBoundingBox(
                         BoundingBox.fromGeoPoints(
-                            (loop + loc).map { GeoPoint(it.lat, it.lon) }
+                            (result.polyline + loc).map { GeoPoint(it.lat, it.lon) }
                         ).increaseByScale(1.3f),
                         true,
                     )
@@ -278,14 +307,31 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     Box(Modifier.fillMaxSize()) {
         AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
 
-        SmallFloatingActionButton(
-            onClick = onOpenHistory,
-            modifier = Modifier
+        Column(
+            Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
                 .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(Icons.Default.History, contentDescription = "Trip history")
+            SmallFloatingActionButton(onClick = onOpenHistory) {
+                Icon(Icons.Default.History, contentDescription = "Trip history")
+            }
+            SmallFloatingActionButton(onClick = { showSettings = true }) {
+                Icon(Icons.Default.Settings, contentDescription = "Routing server settings")
+            }
+        }
+
+        if (showSettings) {
+            ServerSettingsDialog(
+                config = serverConfig,
+                onDismiss = { showSettings = false },
+                onSave = {
+                    serverConfig = it
+                    RoutingServer.save(context, it)
+                    showSettings = false
+                },
+            )
         }
 
         Column(
@@ -312,6 +358,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                 onClick = {
                                     mode = m
                                     radiusKm = m.defaultKm
+                                    destination = null
+                                    route = null
                                 },
                                 shape = SegmentedButtonDefaults.itemShape(
                                     index = index, count = TravelMode.entries.size,
@@ -334,12 +382,21 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text("Radius", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            if (mode.roundTrip) "Trip length" else "Radius",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
                         Text(
                             if (mode.maxKm <= 10f) "%.1f km".format(radiusKm)
                             else "${radiusKm.toInt()} km",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    route?.distanceMeters?.let {
+                        Text(
+                            "Loop found: ${formatDistanceKm(it)}",
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     Slider(
@@ -371,7 +428,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         NavButton(
                             destination = destination,
-                            route = route,
+                            route = route?.waypoints,
                             origin = myLocation,
                             mode = mode,
                             modifier = Modifier.weight(1f),
@@ -405,6 +462,65 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             }
         }
     }
+}
+
+/** Settings for the optional self-hosted GraphHopper server. */
+@Composable
+private fun ServerSettingsDialog(
+    config: ServerConfig,
+    onDismiss: () -> Unit,
+    onSave: (ServerConfig) -> Unit,
+) {
+    var enabled by remember { mutableStateOf(config.enabled) }
+    var url by remember { mutableStateOf(config.url) }
+    var clientId by remember { mutableStateOf(config.clientId) }
+    var clientSecret by remember { mutableStateOf(config.clientSecret) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Routing server") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Self-hosted GraphHopper for Moto round trips. " +
+                        "Falls back to public servers when unreachable.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Use own server")
+                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                }
+                OutlinedTextField(
+                    value = url, onValueChange = { url = it },
+                    label = { Text("Server URL") },
+                    placeholder = { Text("https://…") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = clientId, onValueChange = { clientId = it },
+                    label = { Text("CF Access Client Id") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = clientSecret, onValueChange = { clientSecret = it },
+                    label = { Text("CF Access Client Secret") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onSave(ServerConfig(url, clientId, clientSecret, enabled))
+            }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 /** "Go" button with a chooser for the navigation app. */

@@ -30,8 +30,9 @@ enum class TravelMode(
         gmapsMode = "b",
     ),
     MOTO(
+        // For round trips the slider means total trip length, not radius.
         label = "Moto",
-        minKm = 5f, maxKm = 60f, defaultKm = 25f,
+        minKm = 30f, maxKm = 400f, defaultKm = 120f,
         // Curvy riding roads live on the rural network; skip motorways/residential.
         highwayRegex = "^(primary|secondary|tertiary|unclassified)$",
         gmapsMode = "d",
