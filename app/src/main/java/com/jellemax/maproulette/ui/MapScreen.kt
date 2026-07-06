@@ -46,7 +46,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -353,11 +352,16 @@ fun MapScreen(onOpenHistory: () -> Unit) {
 
         if (showSettings) {
             ServerSettingsDialog(
-                config = serverConfig,
+                custom = RoutingServer.loadCustom(context),
+                builtInAvailable = RoutingServer.bakedDefaults().usable,
                 onDismiss = { showSettings = false },
-                onSave = {
-                    serverConfig = it
-                    RoutingServer.save(context, it)
+                onSave = { customConfig ->
+                    if (customConfig == null) {
+                        RoutingServer.clearCustom(context)
+                    } else {
+                        RoutingServer.save(context, customConfig)
+                    }
+                    serverConfig = RoutingServer.load(context)
                     showSettings = false
                 },
             )
@@ -493,17 +497,20 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     }
 }
 
-/** Settings for the optional self-hosted GraphHopper server. */
+/**
+ * Settings for a custom GraphHopper server. Built-in defaults are never
+ * displayed: empty fields mean the built-in server is used.
+ */
 @Composable
 private fun ServerSettingsDialog(
-    config: ServerConfig,
+    custom: ServerConfig?,
+    builtInAvailable: Boolean,
     onDismiss: () -> Unit,
-    onSave: (ServerConfig) -> Unit,
+    onSave: (ServerConfig?) -> Unit,
 ) {
-    var enabled by remember { mutableStateOf(config.enabled) }
-    var url by remember { mutableStateOf(config.url) }
-    var clientId by remember { mutableStateOf(config.clientId) }
-    var clientSecret by remember { mutableStateOf(config.clientSecret) }
+    var url by remember { mutableStateOf(custom?.url ?: "") }
+    var clientId by remember { mutableStateOf(custom?.clientId ?: "") }
+    var clientSecret by remember { mutableStateOf(custom?.clientSecret ?: "") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -511,24 +518,20 @@ private fun ServerSettingsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "App v${BuildConfig.VERSION_NAME} · active: " +
-                        if (config.usable) config.url else "none (public fallback)",
+                    "App v${BuildConfig.VERSION_NAME} · " + when {
+                        custom != null -> "custom server: ${custom.url}"
+                        builtInAvailable -> "using built-in server"
+                        else -> "public servers only"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    "Self-hosted GraphHopper for Moto round trips. " +
-                        "Falls back to public servers when unreachable.",
+                    "Optional: your own GraphHopper server for spins and round " +
+                        "trips. Leave empty to use the built-in one. Falls back " +
+                        "to public servers when unreachable.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Use own server")
-                    Switch(checked = enabled, onCheckedChange = { enabled = it })
-                }
                 OutlinedTextField(
                     value = url, onValueChange = { url = it },
                     label = { Text("Server URL") },
@@ -537,26 +540,27 @@ private fun ServerSettingsDialog(
                 )
                 OutlinedTextField(
                     value = clientId, onValueChange = { clientId = it },
-                    label = { Text("CF Access Client Id") },
+                    label = { Text("CF Access Client Id (optional)") },
                     singleLine = true,
                 )
                 OutlinedTextField(
                     value = clientSecret, onValueChange = { clientSecret = it },
-                    label = { Text("CF Access Client Secret") },
+                    label = { Text("CF Access Client Secret (optional)") },
                     singleLine = true,
                 )
-                TextButton(onClick = {
-                    val d = RoutingServer.bakedDefaults()
-                    enabled = d.enabled
-                    url = d.url
-                    clientId = d.clientId
-                    clientSecret = d.clientSecret
-                }) { Text("Reset to built-in defaults") }
+                if (custom != null) {
+                    TextButton(onClick = { onSave(null) }) {
+                        Text("Remove custom server")
+                    }
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                onSave(ServerConfig(url, clientId, clientSecret, enabled))
+                onSave(
+                    if (url.isBlank()) null
+                    else ServerConfig(url, clientId, clientSecret, enabled = true)
+                )
             }) { Text("Save") }
         },
         dismissButton = {

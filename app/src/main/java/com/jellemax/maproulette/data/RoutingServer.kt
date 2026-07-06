@@ -42,19 +42,19 @@ object RoutingServer {
         enabled = BuildConfig.ROUTING_URL.isNotBlank(),
     )
 
-    fun load(context: Context): ServerConfig {
+    /** Effective config: user's custom server if set, else baked defaults. */
+    fun load(context: Context): ServerConfig = loadCustom(context) ?: bakedDefaults()
+
+    /** The user's own server settings, or null when using built-in defaults. */
+    fun loadCustom(context: Context): ServerConfig? {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val savedUrl = p.getString("url", "") ?: ""
-        // User-saved settings win only if they actually contain a server URL;
-        // otherwise use the defaults baked in at build time — zero setup.
-        if (!p.getBoolean("saved", false) || savedUrl.isBlank()) {
-            return bakedDefaults()
-        }
+        val url = p.getString("url", "") ?: ""
+        if (!p.getBoolean("saved", false) || url.isBlank()) return null
         return ServerConfig(
-            url = savedUrl,
+            url = url,
             clientId = p.getString("clientId", "") ?: "",
             clientSecret = p.getString("clientSecret", "") ?: "",
-            enabled = p.getBoolean("enabled", false),
+            enabled = true,
         )
     }
 
@@ -64,8 +64,11 @@ object RoutingServer {
             .putString("url", config.url.trim())
             .putString("clientId", config.clientId.trim())
             .putString("clientSecret", config.clientSecret.trim())
-            .putBoolean("enabled", config.enabled)
             .apply()
+    }
+
+    fun clearCustom(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }
 
     fun roundTrip(
