@@ -14,12 +14,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
@@ -266,11 +269,11 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                 shape = SegmentedButtonDefaults.itemShape(
                                     index = index, count = TravelMode.entries.size,
                                 ),
-                                icon = {},
-                                label = {
-                                    Icon(m.icon, contentDescription = null, Modifier.size(18.dp))
-                                    Text("  ${m.label}")
+                                icon = {
+                                    Icon(m.icon, contentDescription = null,
+                                        Modifier.size(SegmentedButtonDefaults.IconSize))
                                 },
+                                label = { Text(m.label, maxLines = 1) },
                             )
                         }
                     }
@@ -298,15 +301,24 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         valueRange = mode.minKm..mode.maxKm,
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = ::spin, enabled = !spinning, modifier = Modifier.weight(1.2f)) {
-                            if (spinning) {
-                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                            } else {
-                                Icon(Icons.Default.Casino, contentDescription = null)
-                            }
-                            Text("  Spin")
+                    Button(
+                        onClick = ::spin,
+                        enabled = !spinning,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                    ) {
+                        if (spinning) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Casino, contentDescription = null,
+                                Modifier.size(20.dp))
                         }
+                        Spacer(Modifier.width(10.dp))
+                        Text("Spin", style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         NavButton(
                             destination = destination,
                             mode = mode,
@@ -320,16 +332,20 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                 },
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null)
-                                Text(" Track")
+                                Icon(Icons.Default.PlayArrow, contentDescription = null,
+                                    Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Track", maxLines = 1)
                             }
                         } else {
                             Button(
                                 onClick = { TripTrackingService.stop(context) },
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Icon(Icons.Default.Stop, contentDescription = null)
-                                Text(" End")
+                                Icon(Icons.Default.Stop, contentDescription = null,
+                                    Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("End trip", maxLines = 1)
                             }
                         }
                     }
@@ -350,8 +366,9 @@ private fun NavButton(destination: LatLon?, mode: TravelMode, modifier: Modifier
             enabled = destination != null,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Icon(Icons.Default.Navigation, contentDescription = null)
-            Text("  Go")
+            Icon(Icons.Default.Navigation, contentDescription = null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Go", maxLines = 1)
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             DropdownMenuItem(
