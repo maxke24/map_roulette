@@ -16,6 +16,9 @@ import kotlin.random.Random
 
 data class LatLon(val lat: Double, val lon: Double)
 
+/** An OSM way: parallel lists of node ids and coordinates. */
+data class OverpassWay(val nodes: List<Long>, val points: List<LatLon>)
+
 /**
  * Picks a random point on a road within a radius, using the Overpass API
  * (OpenStreetMap data).
@@ -56,23 +59,27 @@ object RoadRoulette {
     }
 
     /** Uniform-by-area random point inside the circle. */
-    private fun randomPointInCircle(center: LatLon, radiusMeters: Double): LatLon {
-        val r = radiusMeters * sqrt(Random.nextDouble())
-        val theta = Random.nextDouble(2 * PI)
-        val dLat = (r * cos(theta)) / 111_320.0
-        val dLon = (r * sin(theta)) / (111_320.0 * cos(Math.toRadians(center.lat)))
+    private fun randomPointInCircle(center: LatLon, radiusMeters: Double): LatLon =
+        offset(center, radiusMeters * sqrt(Random.nextDouble()), Random.nextDouble(2 * PI))
+
+    /** Point at [distanceMeters] from [center] in direction [bearingRad]. */
+    fun offset(center: LatLon, distanceMeters: Double, bearingRad: Double): LatLon {
+        val dLat = (distanceMeters * cos(bearingRad)) / 111_320.0
+        val dLon = (distanceMeters * sin(bearingRad)) /
+            (111_320.0 * cos(Math.toRadians(center.lat)))
         return LatLon(center.lat + dLat, center.lon + dLon)
     }
 
     /** Length-weighted random point on the given ways, restricted to the main circle. */
-    private fun pickPoint(ways: List<List<LatLon>>, center: LatLon, radiusMeters: Double): LatLon? {
+    private fun pickPoint(ways: List<OverpassWay>, center: LatLon, radiusMeters: Double): LatLon? {
         data class Segment(val a: LatLon, val b: LatLon, val length: Double)
 
         val segments = ArrayList<Segment>()
         for (way in ways) {
-            for (i in 0 until way.size - 1) {
-                val a = way[i]
-                val b = way[i + 1]
+            val pts = way.points
+            for (i in 0 until pts.size - 1) {
+                val a = pts[i]
+                val b = pts[i + 1]
                 val mid = LatLon((a.lat + b.lat) / 2, (a.lon + b.lon) / 2)
                 if (distanceMeters(center, mid) <= radiusMeters) {
                     segments.add(Segment(a, b, distanceMeters(a, b)))
@@ -96,11 +103,11 @@ object RoadRoulette {
         return segments.last().b
     }
 
-    private fun fetchRoads(
+    fun fetchRoads(
         center: LatLon,
         radiusMeters: Double,
         highwayRegex: String,
-    ): List<List<LatLon>> {
+    ): List<OverpassWay> {
         val query = """
             [out:json][timeout:10];
             way(around:${radiusMeters.toInt()},${center.lat},${center.lon})["highway"~"$highwayRegex"];
@@ -144,9 +151,9 @@ object RoadRoulette {
         }
     }
 
-    private fun parseWays(json: String): List<List<LatLon>> {
+    private fun parseWays(json: String): List<OverpassWay> {
         val elements = JSONObject(json).getJSONArray("elements")
-        val ways = ArrayList<List<LatLon>>(elements.length())
+        val ways = ArrayList<OverpassWay>(elements.length())
         for (i in 0 until elements.length()) {
             val el = elements.getJSONObject(i)
             val geometry = el.optJSONArray("geometry") ?: continue
@@ -155,7 +162,13 @@ object RoadRoulette {
                 val p = geometry.getJSONObject(j)
                 points.add(LatLon(p.getDouble("lat"), p.getDouble("lon")))
             }
-            if (points.size >= 2) ways.add(points)
+            val nodeArray = el.optJSONArray("nodes")
+            val nodes = if (nodeArray != null && nodeArray.length() == points.size) {
+                (0 until nodeArray.length()).map { nodeArray.getLong(it) }
+            } else {
+                List(points.size) { 0L } // no node info; 0 is never a junction id
+            }
+            if (points.size >= 2) ways.add(OverpassWay(nodes, points))
         }
         return ways
     }

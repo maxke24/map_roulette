@@ -12,6 +12,8 @@ enum class TravelMode(
     val highwayRegex: String,
     /** Google Maps navigation mode: w=walk, b=bike, d=drive. */
     val gmapsMode: String,
+    /** Spin produces a loop of waypoints instead of a single destination. */
+    val roundTrip: Boolean = false,
 ) {
     WALK(
         label = "Walk",
@@ -26,6 +28,14 @@ enum class TravelMode(
         highwayRegex = "^(cycleway|living_street|residential|unclassified|" +
             "tertiary|secondary|track|path)$",
         gmapsMode = "b",
+    ),
+    MOTO(
+        label = "Moto",
+        minKm = 5f, maxKm = 60f, defaultKm = 25f,
+        // Curvy riding roads live on the rural network; skip motorways/residential.
+        highwayRegex = "^(primary|secondary|tertiary|unclassified)$",
+        gmapsMode = "d",
+        roundTrip = true,
     ),
     CAR(
         label = "Car",

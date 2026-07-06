@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -72,6 +73,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.RoadRoulette
+import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
 import com.jellemax.maproulette.tracking.TripTrackingService
@@ -86,11 +88,13 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
+import org.osmdroid.views.overlay.Polyline
 
 private val TravelMode.icon: ImageVector
     get() = when (this) {
         TravelMode.WALK -> Icons.AutoMirrored.Filled.DirectionsWalk
         TravelMode.BIKE -> Icons.AutoMirrored.Filled.DirectionsBike
+        TravelMode.MOTO -> Icons.Default.TwoWheeler
         TravelMode.CAR -> Icons.Default.DirectionsCar
     }
 
@@ -103,6 +107,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     var radiusKm by rememberSaveable { mutableFloatStateOf(TravelMode.CAR.defaultKm) }
     var myLocation by remember { mutableStateOf<LatLon?>(null) }
     var destination by remember { mutableStateOf<LatLon?>(null) }
+    var route by remember { mutableStateOf<List<LatLon>?>(null) }
     var spinning by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
@@ -171,8 +176,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
         }
     }
 
-    // Redraw overlays whenever location, radius, or destination changes.
-    LaunchedEffect(myLocation, destination, radiusKm) {
+    // Redraw overlays whenever location, radius, destination, or route changes.
+    LaunchedEffect(myLocation, destination, route, radiusKm) {
         mapView.overlays.clear()
         val loc = myLocation
         if (loc != null) {
@@ -197,6 +202,24 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                 title = "Destination"
             })
         }
+        val loop = route
+        if (loop != null && loc != null) {
+            // Indicative loop: straight lines between waypoints, not the route.
+            mapView.overlays.add(Polyline(mapView).apply {
+                setPoints(
+                    (listOf(loc) + loop + loc).map { GeoPoint(it.lat, it.lon) }
+                )
+                outlinePaint.color = AndroidColor.argb(160, 233, 30, 99)
+                outlinePaint.strokeWidth = 5f
+            })
+            loop.forEachIndexed { i, wp ->
+                mapView.overlays.add(Marker(mapView).apply {
+                    position = GeoPoint(wp.lat, wp.lon)
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                    title = "Stop ${i + 1}"
+                })
+            }
+        }
         mapView.invalidate()
     }
 
@@ -210,16 +233,29 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             spinning = true
             error = null
             try {
-                val dest = withContext(Dispatchers.IO) {
-                    RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0, mode.highwayRegex)
+                if (mode.roundTrip) {
+                    val loop = RoundTripPlanner.plan(loc, radiusKm * 1000.0, mode.highwayRegex)
+                    route = loop
+                    destination = null
+                    mapView.zoomToBoundingBox(
+                        BoundingBox.fromGeoPoints(
+                            (loop + loc).map { GeoPoint(it.lat, it.lon) }
+                        ).increaseByScale(1.3f),
+                        true,
+                    )
+                } else {
+                    val dest = withContext(Dispatchers.IO) {
+                        RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0, mode.highwayRegex)
+                    }
+                    destination = dest
+                    route = null
+                    mapView.zoomToBoundingBox(
+                        BoundingBox.fromGeoPoints(
+                            listOf(GeoPoint(loc.lat, loc.lon), GeoPoint(dest.lat, dest.lon))
+                        ).increaseByScale(1.4f),
+                        true,
+                    )
                 }
-                destination = dest
-                mapView.zoomToBoundingBox(
-                    BoundingBox.fromGeoPoints(
-                        listOf(GeoPoint(loc.lat, loc.lon), GeoPoint(dest.lat, dest.lon))
-                    ).increaseByScale(1.4f),
-                    true,
-                )
             } catch (e: Exception) {
                 error = e.message ?: "Failed to find a road"
             } finally {
@@ -321,6 +357,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         NavButton(
                             destination = destination,
+                            route = route,
+                            origin = myLocation,
                             mode = mode,
                             modifier = Modifier.weight(1f),
                         )
@@ -357,13 +395,19 @@ fun MapScreen(onOpenHistory: () -> Unit) {
 
 /** "Go" button with a chooser for the navigation app. */
 @Composable
-private fun NavButton(destination: LatLon?, mode: TravelMode, modifier: Modifier = Modifier) {
+private fun NavButton(
+    destination: LatLon?,
+    route: List<LatLon>?,
+    origin: LatLon?,
+    mode: TravelMode,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     Box(modifier) {
         FilledTonalButton(
             onClick = { menuOpen = true },
-            enabled = destination != null,
+            enabled = destination != null || (route != null && origin != null),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Icon(Icons.Default.Navigation, contentDescription = null, Modifier.size(18.dp))
@@ -371,27 +415,38 @@ private fun NavButton(destination: LatLon?, mode: TravelMode, modifier: Modifier
             Text("Go", maxLines = 1)
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            DropdownMenuItem(
-                text = { Text("Google Maps") },
-                onClick = {
-                    menuOpen = false
-                    destination?.let { navigateGoogleMaps(context, it, mode) }
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Waze") },
-                onClick = {
-                    menuOpen = false
-                    destination?.let { navigateWaze(context, it) }
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Other app") },
-                onClick = {
-                    menuOpen = false
-                    destination?.let { navigateGeo(context, it) }
-                },
-            )
+            if (route != null && origin != null) {
+                // Waze can't take multi-waypoint routes; Google Maps only.
+                DropdownMenuItem(
+                    text = { Text("Google Maps (round trip)") },
+                    onClick = {
+                        menuOpen = false
+                        navigateRoundTrip(context, origin, route)
+                    },
+                )
+            } else {
+                DropdownMenuItem(
+                    text = { Text("Google Maps") },
+                    onClick = {
+                        menuOpen = false
+                        destination?.let { navigateGoogleMaps(context, it, mode) }
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Waze") },
+                    onClick = {
+                        menuOpen = false
+                        destination?.let { navigateWaze(context, it) }
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Other app") },
+                    onClick = {
+                        menuOpen = false
+                        destination?.let { navigateGeo(context, it) }
+                    },
+                )
+            }
         }
     }
 }
@@ -432,6 +487,20 @@ private fun StatItem(label: String, value: String) {
         Text(label, style = MaterialTheme.typography.labelSmall)
         Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
     }
+}
+
+private fun navigateRoundTrip(context: Context, origin: LatLon, waypoints: List<LatLon>) {
+    // Directions URL: origin = destination = start, curvy roads as via points.
+    // Google Maps supports up to 9 waypoints in this form.
+    val wp = waypoints.joinToString("|") { "${it.lat},${it.lon}" }
+    val uri = Uri.parse(
+        "https://www.google.com/maps/dir/?api=1" +
+            "&origin=${origin.lat},${origin.lon}" +
+            "&destination=${origin.lat},${origin.lon}" +
+            "&travelmode=driving" +
+            "&waypoints=" + Uri.encode(wp)
+    )
+    context.startActivity(Intent(Intent.ACTION_VIEW, uri))
 }
 
 private fun navigateGoogleMaps(context: Context, dest: LatLon, mode: TravelMode) {

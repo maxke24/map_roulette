@@ -4,8 +4,13 @@ Don't know where to drive? Set a radius, spin, get a random point on a real road
 
 ## Features
 
-- **Modes**: walk (0.5–8 km), bike (1–30 km), car (5–100 km) — each with fitting road
-  types (footpaths for walking, no motorways for cycling, …).
+- **Modes**: walk (0.5–8 km), bike (1–30 km), moto (5–60 km), car (5–100 km) — each with
+  fitting road types (footpaths for walking, no motorways for cycling, …).
+- **Moto round trips**: spins a loop of waypoints through the curviest roads around you
+  and hands it to Google Maps as a multi-waypoint route. Curviness is junction-aware:
+  turn radius is estimated from road geometry (circumcircle per vertex triple), and
+  vertices at intersections are excluded — so a left turn at a crossroads doesn't count
+  as a "curve", only sweeping bends within the road do.
 - **Spin**: picks a random point on a road within your chosen radius, using OpenStreetMap
   data via the Overpass API. No API key needed. Samples a random sub-area instead of
   downloading every road in the circle, so it stays fast at large radii.
