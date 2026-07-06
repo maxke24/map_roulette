@@ -22,6 +22,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.MainActivity
 import com.jellemax.maproulette.data.LatLon
+import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
@@ -70,6 +71,8 @@ class TripTrackingService : Service() {
     private var destLat: Double? = null
     private var destLon: Double? = null
     private val tracePoints = ArrayList<LatLon>()
+    private var origin: LatLon? = null
+    private var awayFromOrigin = false
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -126,9 +129,23 @@ class TripTrackingService : Service() {
             val p = LatLon(location.latitude, location.longitude)
             val lastTrace = tracePoints.lastOrNull()
             if (lastTrace == null ||
-                com.jellemax.maproulette.data.RoadRoulette.distanceMeters(lastTrace, p) >= 25.0
+                RoadRoulette.distanceMeters(lastTrace, p) >= 25.0
             ) {
                 tracePoints.add(p)
+            }
+
+            // Auto-stop when back at the starting point after a real trip.
+            if (origin == null) origin = p
+            origin?.let { start ->
+                val fromStart = RoadRoulette.distanceMeters(p, start)
+                if (fromStart > 400) awayFromOrigin = true
+                if (awayFromOrigin && fromStart < 120 &&
+                    now - stats.startTimeMs > 5 * 60_000
+                ) {
+                    notifyTripEnded()
+                    stopSelf()
+                    return
+                }
             }
         }
 
@@ -170,6 +187,16 @@ class TripTrackingService : Service() {
             CHANNEL_ID, "Trip tracking", NotificationManager.IMPORTANCE_LOW,
         )
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun notifyTripEnded() {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Map Roulette")
+            .setContentText("Back at your starting point — trip saved.")
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(2, notification)
     }
 
     private fun buildNotification(): android.app.Notification {

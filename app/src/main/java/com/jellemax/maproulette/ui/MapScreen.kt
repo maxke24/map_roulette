@@ -553,6 +553,13 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                             route = route?.waypoints,
                             origin = myLocation,
                             mode = mode,
+                            onNavigate = {
+                                // Heading out = start tracking automatically.
+                                if (stats == null) {
+                                    TripTrackingService.start(
+                                        context, destination?.lat, destination?.lon)
+                                }
+                            },
                             modifier = Modifier.weight(1f),
                         )
                         if (stats == null) {
@@ -695,6 +702,7 @@ private fun NavButton(
     route: List<LatLon>?,
     origin: LatLon?,
     mode: TravelMode,
+    onNavigate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -716,6 +724,7 @@ private fun NavButton(
                     text = { Text("Google Maps (round trip)") },
                     onClick = {
                         menuOpen = false
+                        onNavigate()
                         navigateRoundTrip(context, origin, route)
                     },
                 )
@@ -724,6 +733,7 @@ private fun NavButton(
                     text = { Text("Google Maps") },
                     onClick = {
                         menuOpen = false
+                        onNavigate()
                         destination?.let { navigateGoogleMaps(context, it, mode) }
                     },
                 )
@@ -731,6 +741,7 @@ private fun NavButton(
                     text = { Text("Waze") },
                     onClick = {
                         menuOpen = false
+                        onNavigate()
                         destination?.let { navigateWaze(context, it) }
                     },
                 )
@@ -738,6 +749,7 @@ private fun NavButton(
                     text = { Text("Other app") },
                     onClick = {
                         menuOpen = false
+                        onNavigate()
                         destination?.let { navigateGeo(context, it) }
                     },
                 )
