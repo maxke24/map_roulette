@@ -35,20 +35,23 @@ object RoutingServer {
 
     private const val PREFS = "routing_server"
 
+    fun bakedDefaults(): ServerConfig = ServerConfig(
+        url = BuildConfig.ROUTING_URL,
+        clientId = BuildConfig.ROUTING_CF_ID,
+        clientSecret = BuildConfig.ROUTING_CF_SECRET,
+        enabled = BuildConfig.ROUTING_URL.isNotBlank(),
+    )
+
     fun load(context: Context): ServerConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // Until the user saves their own settings, use the defaults baked in
-        // at build time (GitHub secrets / local.properties) — zero setup.
-        if (!p.getBoolean("saved", false)) {
-            return ServerConfig(
-                url = BuildConfig.ROUTING_URL,
-                clientId = BuildConfig.ROUTING_CF_ID,
-                clientSecret = BuildConfig.ROUTING_CF_SECRET,
-                enabled = BuildConfig.ROUTING_URL.isNotBlank(),
-            )
+        val savedUrl = p.getString("url", "") ?: ""
+        // User-saved settings win only if they actually contain a server URL;
+        // otherwise use the defaults baked in at build time — zero setup.
+        if (!p.getBoolean("saved", false) || savedUrl.isBlank()) {
+            return bakedDefaults()
         }
         return ServerConfig(
-            url = p.getString("url", "") ?: "",
+            url = savedUrl,
             clientId = p.getString("clientId", "") ?: "",
             clientSecret = p.getString("clientSecret", "") ?: "",
             enabled = p.getBoolean("enabled", false),

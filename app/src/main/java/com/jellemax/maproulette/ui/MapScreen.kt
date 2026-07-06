@@ -515,6 +515,13 @@ private fun ServerSettingsDialog(
                     label = { Text("CF Access Client Secret") },
                     singleLine = true,
                 )
+                TextButton(onClick = {
+                    val d = RoutingServer.bakedDefaults()
+                    enabled = d.enabled
+                    url = d.url
+                    clientId = d.clientId
+                    clientSecret = d.clientSecret
+                }) { Text("Reset to built-in defaults") }
             }
         },
         confirmButton = {
