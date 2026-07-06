@@ -248,6 +248,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     // real road-following loop); fall back to Overpass sampling.
                     val tripMeters = radiusKm * 1000.0
                     var result: RouteResult? = null
+                    var serverError: String? = null
                     if (serverConfig.usable) {
                         result = try {
                             withContext(Dispatchers.IO) {
@@ -257,7 +258,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            null // server down/misconfigured: try Overpass below
+                            serverError = e.message ?: e.javaClass.simpleName
+                            null // fall back to Overpass below, but say why
                         }
                     }
                     if (result == null) {
@@ -268,6 +270,9 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                             waypoints = wps,
                             distanceMeters = null,
                         )
+                        if (serverError != null) {
+                            error = "Server route failed ($serverError) — approximate loop instead"
+                        }
                     }
                     route = result
                     destination = null

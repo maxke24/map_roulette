@@ -1,8 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Routing server defaults baked into the APK. Read from local.properties
+// (local builds) or environment (CI, via GitHub secrets). All optional.
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+fun routingCfg(propKey: String, envKey: String): String =
+    localProps.getProperty(propKey) ?: System.getenv(envKey) ?: ""
 
 android {
     namespace = "com.jellemax.maproulette"
@@ -12,8 +24,15 @@ android {
         applicationId = "com.jellemax.maproulette"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.3"
+        versionCode = 6
+        versionName = "1.3.1"
+
+        buildConfigField("String", "ROUTING_URL",
+            "\"${routingCfg("routing.url", "ROUTING_SERVER_URL")}\"")
+        buildConfigField("String", "ROUTING_CF_ID",
+            "\"${routingCfg("routing.cfId", "ROUTING_CF_ID")}\"")
+        buildConfigField("String", "ROUTING_CF_SECRET",
+            "\"${routingCfg("routing.cfSecret", "ROUTING_CF_SECRET")}\"")
     }
 
     buildTypes {
@@ -33,6 +52,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

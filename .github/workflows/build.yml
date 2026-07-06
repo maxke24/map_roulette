@@ -23,6 +23,10 @@ jobs:
 
       - name: Build debug APK
         run: ./gradlew assembleDebug
+        env:
+          ROUTING_SERVER_URL: ${{ secrets.ROUTING_SERVER_URL }}
+          ROUTING_CF_ID: ${{ secrets.ROUTING_CF_ID }}
+          ROUTING_CF_SECRET: ${{ secrets.ROUTING_CF_SECRET }}
 
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk map-roulette.apk

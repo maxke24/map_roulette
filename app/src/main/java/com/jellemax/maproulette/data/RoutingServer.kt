@@ -1,6 +1,7 @@
 package com.jellemax.maproulette.data
 
 import android.content.Context
+import com.jellemax.maproulette.BuildConfig
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -36,6 +37,16 @@ object RoutingServer {
 
     fun load(context: Context): ServerConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // Until the user saves their own settings, use the defaults baked in
+        // at build time (GitHub secrets / local.properties) — zero setup.
+        if (!p.getBoolean("saved", false)) {
+            return ServerConfig(
+                url = BuildConfig.ROUTING_URL,
+                clientId = BuildConfig.ROUTING_CF_ID,
+                clientSecret = BuildConfig.ROUTING_CF_SECRET,
+                enabled = BuildConfig.ROUTING_URL.isNotBlank(),
+            )
+        }
         return ServerConfig(
             url = p.getString("url", "") ?: "",
             clientId = p.getString("clientId", "") ?: "",
@@ -46,6 +57,7 @@ object RoutingServer {
 
     fun save(context: Context, config: ServerConfig) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean("saved", true)
             .putString("url", config.url.trim())
             .putString("clientId", config.clientId.trim())
             .putString("clientSecret", config.clientSecret.trim())
