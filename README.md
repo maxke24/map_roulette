@@ -4,9 +4,12 @@ Don't know where to drive? Set a radius, spin, get a random point on a real road
 
 ## Features
 
-- **Spin**: picks a random point on a drivable road within your chosen radius (1–50 km),
-  weighted by road length, using OpenStreetMap data via the Overpass API. No API key needed.
-- **Go**: hands the destination off to Google Maps (or any installed maps app) for turn-by-turn navigation.
+- **Modes**: walk (0.5–8 km), bike (1–30 km), car (5–100 km) — each with fitting road
+  types (footpaths for walking, no motorways for cycling, …).
+- **Spin**: picks a random point on a road within your chosen radius, using OpenStreetMap
+  data via the Overpass API. No API key needed. Samples a random sub-area instead of
+  downloading every road in the circle, so it stays fast at large radii.
+- **Go**: turn-by-turn navigation via Google Maps, Waze, or any installed maps app.
 - **Track**: foreground service records your drive — duration, distance, current speed, top speed.
 - **History**: past trips with duration, distance, average and top speed.
 

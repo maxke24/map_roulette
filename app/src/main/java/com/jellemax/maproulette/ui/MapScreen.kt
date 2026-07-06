@@ -16,21 +16,33 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsBike
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Casino
+import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -46,7 +58,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -55,6 +69,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.RoadRoulette
+import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
 import com.jellemax.maproulette.tracking.TripTrackingService
 import kotlinx.coroutines.Dispatchers
@@ -69,12 +84,20 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 
+private val TravelMode.icon: ImageVector
+    get() = when (this) {
+        TravelMode.WALK -> Icons.AutoMirrored.Filled.DirectionsWalk
+        TravelMode.BIKE -> Icons.AutoMirrored.Filled.DirectionsBike
+        TravelMode.CAR -> Icons.Default.DirectionsCar
+    }
+
 @Composable
 fun MapScreen(onOpenHistory: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var radiusKm by rememberSaveable { mutableFloatStateOf(10f) }
+    var mode by rememberSaveable { mutableStateOf(TravelMode.CAR) }
+    var radiusKm by rememberSaveable { mutableFloatStateOf(TravelMode.CAR.defaultKm) }
     var myLocation by remember { mutableStateOf<LatLon?>(null) }
     var destination by remember { mutableStateOf<LatLon?>(null) }
     var spinning by remember { mutableStateOf(false) }
@@ -185,7 +208,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             error = null
             try {
                 val dest = withContext(Dispatchers.IO) {
-                    RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0)
+                    RoadRoulette.randomRoadPoint(loc, radiusKm * 1000.0, mode.highwayRegex)
                 }
                 destination = dest
                 mapView.zoomToBoundingBox(
@@ -209,6 +232,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             onClick = onOpenHistory,
             modifier = Modifier
                 .align(Alignment.TopEnd)
+                .statusBarsPadding()
                 .padding(12.dp),
         ) {
             Icon(Icons.Default.History, contentDescription = "Trip history")
@@ -218,25 +242,64 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             stats?.let { ActiveTripCard(it) }
 
-            Card {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Card(
+                shape = MaterialTheme.shapes.extraLarge,
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                ),
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        TravelMode.entries.forEachIndexed { index, m ->
+                            SegmentedButton(
+                                selected = mode == m,
+                                onClick = {
+                                    mode = m
+                                    radiusKm = m.defaultKm
+                                },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index, count = TravelMode.entries.size,
+                                ),
+                                icon = {},
+                                label = {
+                                    Icon(m.icon, contentDescription = null, Modifier.size(18.dp))
+                                    Text("  ${m.label}")
+                                },
+                            )
+                        }
+                    }
+
                     error?.let {
                         Text(it, color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall)
                     }
-                    Text("Radius: ${radiusKm.toInt()} km", style = MaterialTheme.typography.labelLarge)
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("Radius", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            if (mode.maxKm <= 10f) "%.1f km".format(radiusKm)
+                            else "${radiusKm.toInt()} km",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                     Slider(
                         value = radiusKm,
                         onValueChange = { radiusKm = it },
-                        valueRange = 1f..50f,
+                        valueRange = mode.minKm..mode.maxKm,
                     )
+
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = ::spin, enabled = !spinning, modifier = Modifier.weight(1f)) {
+                        Button(onClick = ::spin, enabled = !spinning, modifier = Modifier.weight(1.2f)) {
                             if (spinning) {
                                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                             } else {
@@ -244,14 +307,11 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                             }
                             Text("  Spin")
                         }
-                        OutlinedButton(
-                            onClick = { destination?.let { navigateTo(context, it) } },
-                            enabled = destination != null,
+                        NavButton(
+                            destination = destination,
+                            mode = mode,
                             modifier = Modifier.weight(1f),
-                        ) {
-                            Icon(Icons.Default.Navigation, contentDescription = null)
-                            Text("  Go")
-                        }
+                        )
                         if (stats == null) {
                             OutlinedButton(
                                 onClick = {
@@ -261,7 +321,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Default.PlayArrow, contentDescription = null)
-                                Text("  Track")
+                                Text(" Track")
                             }
                         } else {
                             Button(
@@ -269,12 +329,52 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Default.Stop, contentDescription = null)
-                                Text("  End")
+                                Text(" End")
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/** "Go" button with a chooser for the navigation app. */
+@Composable
+private fun NavButton(destination: LatLon?, mode: TravelMode, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var menuOpen by remember { mutableStateOf(false) }
+    Box(modifier) {
+        FilledTonalButton(
+            onClick = { menuOpen = true },
+            enabled = destination != null,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(Icons.Default.Navigation, contentDescription = null)
+            Text("  Go")
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            DropdownMenuItem(
+                text = { Text("Google Maps") },
+                onClick = {
+                    menuOpen = false
+                    destination?.let { navigateGoogleMaps(context, it, mode) }
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Waze") },
+                onClick = {
+                    menuOpen = false
+                    destination?.let { navigateWaze(context, it) }
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Other app") },
+                onClick = {
+                    menuOpen = false
+                    destination?.let { navigateGeo(context, it) }
+                },
+            )
         }
     }
 }
@@ -289,7 +389,12 @@ private fun ActiveTripCard(stats: TripStats) {
             delay(1000)
         }
     }
-    Card {
+    Card(
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -308,19 +413,37 @@ private fun ActiveTripCard(stats: TripStats) {
 private fun StatItem(label: String, value: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(label, style = MaterialTheme.typography.labelSmall)
-        Text(value, style = MaterialTheme.typography.titleMedium)
+        Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
     }
 }
 
-private fun navigateTo(context: Context, dest: LatLon) {
-    val gmaps = Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=${dest.lat},${dest.lon}"))
-        .setPackage("com.google.android.apps.maps")
+private fun navigateGoogleMaps(context: Context, dest: LatLon, mode: TravelMode) {
+    val uri = Uri.parse("google.navigation:q=${dest.lat},${dest.lon}&mode=${mode.gmapsMode}")
+    val intent = Intent(Intent.ACTION_VIEW, uri).setPackage("com.google.android.apps.maps")
     try {
-        context.startActivity(gmaps)
+        context.startActivity(intent)
     } catch (e: ActivityNotFoundException) {
-        // No Google Maps installed: let any maps app handle a geo: URI.
+        navigateGeo(context, dest)
+    }
+}
+
+private fun navigateWaze(context: Context, dest: LatLon) {
+    try {
         context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse("geo:${dest.lat},${dest.lon}?q=${dest.lat},${dest.lon}"))
+            Intent(Intent.ACTION_VIEW, Uri.parse("waze://?ll=${dest.lat},${dest.lon}&navigate=yes"))
+        )
+    } catch (e: ActivityNotFoundException) {
+        // Waze not installed: universal link opens install page or web.
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://waze.com/ul?ll=${dest.lat},${dest.lon}&navigate=yes"))
         )
     }
+}
+
+private fun navigateGeo(context: Context, dest: LatLon) {
+    context.startActivity(
+        Intent(Intent.ACTION_VIEW,
+            Uri.parse("geo:${dest.lat},${dest.lon}?q=${dest.lat},${dest.lon}"))
+    )
 }
