@@ -21,6 +21,8 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.MainActivity
+import com.jellemax.maproulette.data.LatLon
+import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,6 +69,7 @@ class TripTrackingService : Service() {
     private var lastLocation: Location? = null
     private var destLat: Double? = null
     private var destLon: Double? = null
+    private val tracePoints = ArrayList<LatLon>()
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -118,6 +121,17 @@ class TripTrackingService : Service() {
         val speed = if (location.hasSpeed()) location.speed.toDouble() else 0.0
         lastLocation = location
 
+        // Trace for the fog-of-war map, decimated to ~25 m spacing.
+        if (location.accuracy <= 50f) {
+            val p = LatLon(location.latitude, location.longitude)
+            val lastTrace = tracePoints.lastOrNull()
+            if (lastTrace == null ||
+                com.jellemax.maproulette.data.RoadRoulette.distanceMeters(lastTrace, p) >= 25.0
+            ) {
+                tracePoints.add(p)
+            }
+        }
+
         _stats.value = stats.copy(
             durationMs = now - stats.startTimeMs,
             distanceMeters = distance,
@@ -132,6 +146,7 @@ class TripTrackingService : Service() {
         }
         val stats = _stats.value
         if (stats != null && stats.durationMs > 0) {
+            TraceStore.append(this, tracePoints)
             TripStore.save(
                 this,
                 Trip(

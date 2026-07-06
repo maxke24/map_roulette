@@ -94,10 +94,17 @@ object RoundTripPlanner {
     private const val MIN_WAYPOINTS = 3
     private const val MIN_CURVY_SCORE = 0.12
 
-    suspend fun plan(center: LatLon, radiusMeters: Double, highwayRegex: String): List<LatLon> =
+    suspend fun plan(
+        center: LatLon,
+        radiusMeters: Double,
+        highwayRegex: String,
+        bearingDeg: Double? = null,
+    ): List<LatLon> =
         withTimeout(45_000) {
             coroutineScope {
-                val startAngle = Random.nextDouble(2 * PI)
+                // A loop covers all directions; a bearing just anchors where it starts.
+                val startAngle = bearingDeg?.let { Math.toRadians(it) }
+                    ?: Random.nextDouble(2 * PI)
                 val overpassLimit = Semaphore(2) // be polite to the public API
                 val waypoints = (0 until SECTORS).map { s ->
                     async(Dispatchers.IO) {

@@ -76,6 +76,7 @@ object RoutingServer {
         start: LatLon,
         distanceMeters: Double,
         seed: Long,
+        headingDeg: Double? = null,
     ): RouteResult {
         // Long loops can point past the graph's map edge or into road-sparse
         // areas ("could not find a valid point"). Shrink and reroll direction
@@ -85,7 +86,7 @@ object RoutingServer {
         var lastError: IOException? = null
         repeat(4) {
             try {
-                return requestRoundTrip(config, start, dist, s)
+                return requestRoundTrip(config, start, dist, s, headingDeg)
             } catch (e: IOException) {
                 lastError = e
                 dist *= 0.75
@@ -100,6 +101,7 @@ object RoutingServer {
         start: LatLon,
         distanceMeters: Double,
         seed: Long,
+        headingDeg: Double?,
     ): RouteResult {
         val url = config.url.trimEnd('/') +
             "/route?profile=moto" +
@@ -107,6 +109,7 @@ object RoutingServer {
             "&algorithm=round_trip" +
             "&round_trip.distance=${distanceMeters.toInt()}" +
             "&round_trip.seed=$seed" +
+            (headingDeg?.let { "&heading=${it.toInt()}" } ?: "") +
             "&points_encoded=false"
 
         val conn = URL(url).openConnection() as HttpURLConnection
@@ -158,10 +161,11 @@ object RoutingServer {
         config: ServerConfig,
         center: LatLon,
         radiusMeters: Double,
+        bearingDeg: Double? = null,
     ): LatLon {
         var best: LatLon? = null
         repeat(3) {
-            val target = RoadRoulette.randomPointInCircle(center, radiusMeters)
+            val target = RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
             val snapped = snapToRoad(config, center, target) ?: return@repeat
             if (RoadRoulette.distanceMeters(center, snapped) <= radiusMeters * 1.15) {
                 return snapped

@@ -7,6 +7,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.zip.GZIPInputStream
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min
@@ -36,21 +37,28 @@ object RoadRoulette {
         "https://overpass.kumi.systems/api/interpreter",
     )
 
-    fun randomRoadPoint(center: LatLon, radiusMeters: Double, highwayRegex: String): LatLon {
+    fun randomRoadPoint(
+        center: LatLon,
+        radiusMeters: Double,
+        highwayRegex: String,
+        bearingDeg: Double? = null,
+    ): LatLon {
         // Small circles are cheap to fetch whole.
         if (radiusMeters <= 1500) {
-            return pickPoint(fetchRoads(center, radiusMeters, highwayRegex), center, radiusMeters)
-                ?: throw IOException("No roads found within radius")
+            return pickPoint(
+                fetchRoads(center, radiusMeters, highwayRegex),
+                center, radiusMeters, bearingDeg,
+            ) ?: throw IOException("No roads found within radius")
         }
 
         var lastError: IOException? = null
         for (attempt in 0 until 4) {
-            val sample = randomPointInCircle(center, radiusMeters)
+            val sample = randomPointInCircle(center, radiusMeters, bearingDeg)
             // 600 m, 2.4 km, 5.4 km, 9.6 km — widen only if the spot was empty.
             val searchRadius = min(600.0 * (attempt + 1) * (attempt + 1), radiusMeters)
             try {
                 val ways = fetchRoads(sample, searchRadius, highwayRegex)
-                pickPoint(ways, center, radiusMeters)?.let { return it }
+                pickPoint(ways, center, radiusMeters, bearingDeg)?.let { return it }
             } catch (e: IOException) {
                 lastError = e
             }
@@ -58,9 +66,34 @@ object RoadRoulette {
         throw lastError ?: IOException("No roads found within radius")
     }
 
-    /** Uniform-by-area random point inside the circle. */
-    fun randomPointInCircle(center: LatLon, radiusMeters: Double): LatLon =
-        offset(center, radiusMeters * sqrt(Random.nextDouble()), Random.nextDouble(2 * PI))
+    /**
+     * Uniform-by-area random point inside the circle; with [bearingDeg] set,
+     * constrained to a ±45° wedge in that compass direction.
+     */
+    fun randomPointInCircle(
+        center: LatLon,
+        radiusMeters: Double,
+        bearingDeg: Double? = null,
+    ): LatLon {
+        val theta = if (bearingDeg == null) {
+            Random.nextDouble(2 * PI)
+        } else {
+            Math.toRadians(bearingDeg) + Random.nextDouble(-PI / 4, PI / 4)
+        }
+        return offset(center, radiusMeters * sqrt(Random.nextDouble()), theta)
+    }
+
+    /** Compass bearing from [from] to [to], degrees 0–360 (0 = north). */
+    fun bearingDeg(from: LatLon, to: LatLon): Double {
+        val dLat = to.lat - from.lat
+        val dLon = (to.lon - from.lon) * cos(Math.toRadians(from.lat))
+        return (Math.toDegrees(atan2(dLon, dLat)) + 360.0) % 360.0
+    }
+
+    fun withinWedge(center: LatLon, p: LatLon, bearingDeg: Double, halfAngleDeg: Double): Boolean {
+        val diff = abs(bearingDeg(center, p) - bearingDeg) % 360.0
+        return min(diff, 360.0 - diff) <= halfAngleDeg
+    }
 
     /** Point at [distanceMeters] from [center] in direction [bearingRad]. */
     fun offset(center: LatLon, distanceMeters: Double, bearingRad: Double): LatLon {
@@ -71,7 +104,12 @@ object RoadRoulette {
     }
 
     /** Length-weighted random point on the given ways, restricted to the main circle. */
-    private fun pickPoint(ways: List<OverpassWay>, center: LatLon, radiusMeters: Double): LatLon? {
+    private fun pickPoint(
+        ways: List<OverpassWay>,
+        center: LatLon,
+        radiusMeters: Double,
+        bearingDeg: Double? = null,
+    ): LatLon? {
         data class Segment(val a: LatLon, val b: LatLon, val length: Double)
 
         val segments = ArrayList<Segment>()
@@ -81,7 +119,9 @@ object RoadRoulette {
                 val a = pts[i]
                 val b = pts[i + 1]
                 val mid = LatLon((a.lat + b.lat) / 2, (a.lon + b.lon) / 2)
-                if (distanceMeters(center, mid) <= radiusMeters) {
+                if (distanceMeters(center, mid) <= radiusMeters &&
+                    (bearingDeg == null || withinWedge(center, mid, bearingDeg, 50.0))
+                ) {
                     segments.add(Segment(a, b, distanceMeters(a, b)))
                 }
             }
@@ -115,12 +155,16 @@ object RoadRoulette {
             out geom;
         """.trimIndent()
 
+        return parseWays(rawQuery(query, endpointOffset))
+    }
+
+    /** Runs an Overpass query, rotating across mirrors on failure. */
+    fun rawQuery(query: String, endpointOffset: Int = 0): String {
         var lastError: IOException? = null
-        // Rotate the endpoint order per caller to spread load across mirrors.
         for (i in ENDPOINTS.indices) {
             val endpoint = ENDPOINTS[(i + endpointOffset) % ENDPOINTS.size]
             try {
-                return parseWays(post(endpoint, query))
+                return post(endpoint, query)
             } catch (e: IOException) {
                 lastError = e
             }

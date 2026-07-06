@@ -28,12 +28,16 @@ import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TwoWheeler
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -77,11 +81,14 @@ import com.jellemax.maproulette.BuildConfig
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
+import com.jellemax.maproulette.data.PoiKind
+import com.jellemax.maproulette.data.PoiRoulette
 import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.RouteResult
 import com.jellemax.maproulette.data.RoutingServer
 import com.jellemax.maproulette.data.ServerConfig
+import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
 import com.jellemax.maproulette.tracking.TripTrackingService
@@ -102,6 +109,9 @@ import kotlin.random.Random
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
+
+private val DIRECTION_NAMES = listOf("North", "North-east", "East", "South-east",
+    "South", "South-west", "West", "North-west")
 
 private val TravelMode.icon: ImageVector
     get() = when (this) {
@@ -126,7 +136,17 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var serverConfig by remember { mutableStateOf(RoutingServer.load(context)) }
     var showSettings by remember { mutableStateOf(false) }
+    var poiKind by rememberSaveable { mutableStateOf(PoiKind.ROAD) }
+    var directionDeg by rememberSaveable { mutableStateOf<Float?>(null) }
+    var destinationName by remember { mutableStateOf<String?>(null) }
+    var fogEnabled by rememberSaveable { mutableStateOf(false) }
+    var tracesVersion by remember { mutableStateOf(0) }
+    val traces = remember(tracesVersion) {
+        TraceStore.loadAll(context).map { trace -> trace.map { GeoPoint(it.lat, it.lon) } }
+    }
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
+    // Reload explored traces when a trip ends.
+    LaunchedEffect(stats == null) { if (stats == null) tracesVersion++ }
 
     val mapView = remember {
         MapView(context).apply {
@@ -193,21 +213,40 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     }
 
     // Redraw overlays whenever location, radius, destination, or route changes.
-    LaunchedEffect(myLocation, destination, route, radiusKm, mode) {
+    LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg, fogEnabled, traces) {
         mapView.overlays.clear()
+        if (fogEnabled) {
+            mapView.overlays.add(FogOverlay(
+                tracesProvider = { traces },
+                currentLocationProvider = {
+                    myLocation?.let { GeoPoint(it.lat, it.lon) }
+                },
+            ))
+        }
         val loc = myLocation
         if (loc != null) {
             val center = GeoPoint(loc.lat, loc.lon)
+            val reachMeters = if (mode.roundTrip) radiusKm * 250.0 else radiusKm * 1000.0
             mapView.overlays.add(Polygon(mapView).apply {
                 // For round trips the slider is trip length; reach ≈ length / 4.
-                points = Polygon.pointsAsCircle(
-                    center,
-                    if (mode.roundTrip) radiusKm * 250.0 else radiusKm * 1000.0,
-                )
+                points = Polygon.pointsAsCircle(center, reachMeters)
                 outlinePaint.color = AndroidColor.argb(180, 33, 150, 243)
                 outlinePaint.strokeWidth = 3f
                 fillPaint.color = AndroidColor.argb(24, 33, 150, 243)
             })
+            directionDeg?.let { dir ->
+                // Wedge showing the chosen spin direction (±45°).
+                val arc = (-45..45 step 5).map { d ->
+                    GeoPoint(loc.lat, loc.lon).destinationPoint(
+                        reachMeters, (dir + d).toDouble())
+                }
+                mapView.overlays.add(Polygon(mapView).apply {
+                    points = listOf(center) + arc + center
+                    outlinePaint.color = AndroidColor.argb(150, 255, 152, 0)
+                    outlinePaint.strokeWidth = 2f
+                    fillPaint.color = AndroidColor.argb(28, 255, 152, 0)
+                })
+            }
             mapView.overlays.add(Marker(mapView).apply {
                 position = center
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
@@ -253,7 +292,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         result = try {
                             withContext(Dispatchers.IO) {
                                 RoutingServer.roundTrip(
-                                    serverConfig, loc, tripMeters, Random.nextLong())
+                                    serverConfig, loc, tripMeters, Random.nextLong(),
+                                    headingDeg = directionDeg?.toDouble())
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -264,7 +304,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     }
                     if (result == null) {
                         val wps = RoundTripPlanner.plan(
-                            loc, tripMeters / 4.0, mode.highwayRegex)
+                            loc, tripMeters / 4.0, mode.highwayRegex,
+                            bearingDeg = directionDeg?.toDouble())
                         result = RouteResult(
                             polyline = listOf(loc) + wps + loc,
                             waypoints = wps,
@@ -276,6 +317,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     }
                     route = result
                     destination = null
+                    destinationName = null
                     mapView.zoomToBoundingBox(
                         BoundingBox.fromGeoPoints(
                             (result.polyline + loc).map { GeoPoint(it.lat, it.lon) }
@@ -283,29 +325,44 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         true,
                     )
                 } else {
-                    val dest = withTimeout(30_000) {
-                        withContext(Dispatchers.IO) {
-                            // Car can use the own server (snap random point to road,
-                            // reachability guaranteed); walk/bike need path/footway
-                            // data the server doesn't import, so Overpass only.
-                            var d: LatLon? = null
-                            if (mode == TravelMode.CAR && serverConfig.usable) {
-                                d = try {
-                                    RoutingServer.randomRoadDestination(
-                                        serverConfig, loc, radiusKm * 1000.0)
-                                } catch (e: CancellationException) {
-                                    throw e
-                                } catch (e: Exception) {
-                                    serverError = e.message
-                                    null
-                                }
+                    val bearing = directionDeg?.toDouble()
+                    if (poiKind != PoiKind.ROAD) {
+                        val poi = withTimeout(30_000) {
+                            withContext(Dispatchers.IO) {
+                                PoiRoulette.randomPoi(
+                                    loc, radiusKm * 1000.0, poiKind, bearing)
                             }
-                            d ?: RoadRoulette.randomRoadPoint(
-                                loc, radiusKm * 1000.0, mode.highwayRegex)
                         }
+                        destination = poi.location
+                        destinationName = poi.name
+                        route = null
+                    } else {
+                        val dest = withTimeout(30_000) {
+                            withContext(Dispatchers.IO) {
+                                // Car can use the own server (snap random point to road,
+                                // reachability guaranteed); walk/bike need path/footway
+                                // data the server doesn't import, so Overpass only.
+                                var d: LatLon? = null
+                                if (mode == TravelMode.CAR && serverConfig.usable) {
+                                    d = try {
+                                        RoutingServer.randomRoadDestination(
+                                            serverConfig, loc, radiusKm * 1000.0, bearing)
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        serverError = e.message
+                                        null
+                                    }
+                                }
+                                d ?: RoadRoulette.randomRoadPoint(
+                                    loc, radiusKm * 1000.0, mode.highwayRegex, bearing)
+                            }
+                        }
+                        destination = dest
+                        destinationName = null
+                        route = null
                     }
-                    destination = dest
-                    route = null
+                    val dest = destination!!
                     mapView.zoomToBoundingBox(
                         BoundingBox.fromGeoPoints(
                             listOf(GeoPoint(loc.lat, loc.lon), GeoPoint(dest.lat, dest.lon))
@@ -347,6 +404,12 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             }
             SmallFloatingActionButton(onClick = { showSettings = true }) {
                 Icon(Icons.Default.Settings, contentDescription = "Routing server settings")
+            }
+            SmallFloatingActionButton(onClick = { fogEnabled = !fogEnabled }) {
+                Icon(
+                    if (fogEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                    contentDescription = "Fog of war",
+                )
             }
         }
 
@@ -392,6 +455,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                                     mode = m
                                     radiusKm = m.defaultKm
                                     destination = null
+                                    destinationName = null
                                     route = null
                                 },
                                 shape = SegmentedButtonDefaults.itemShape(
@@ -432,11 +496,36 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
+                    destinationName?.let {
+                        Text("→ $it", style = MaterialTheme.typography.bodySmall)
+                    }
                     Slider(
                         value = radiusKm,
                         onValueChange = { radiusKm = it },
                         valueRange = mode.minKm..mode.maxKm,
                     )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (!mode.roundTrip) {
+                            SelectorChip(
+                                icon = Icons.Default.Place,
+                                label = poiKind.label,
+                                options = PoiKind.entries.map { it.label },
+                                onSelect = { poiKind = PoiKind.entries[it] },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        SelectorChip(
+                            icon = Icons.Default.Explore,
+                            label = directionDeg?.let { DIRECTION_NAMES[(it / 45f).toInt()] }
+                                ?: "Any direction",
+                            options = listOf("Any direction") + DIRECTION_NAMES,
+                            onSelect = { i ->
+                                directionDeg = if (i == 0) null else (i - 1) * 45f
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
 
                     Button(
                         onClick = { if (spinning) spinJob?.cancel() else spin() },
@@ -492,6 +581,36 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Compact dropdown selector for destination kind and direction. */
+@Composable
+private fun SelectorChip(
+    icon: ImageVector,
+    label: String,
+    options: List<String>,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+            Icon(icon, contentDescription = null, Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(label, maxLines = 1)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEachIndexed { i, option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        open = false
+                        onSelect(i)
+                    },
+                )
             }
         }
     }
