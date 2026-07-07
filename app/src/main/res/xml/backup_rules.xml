@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Google Drive auto-backup (Android 11 and below). Trips, fog-of-war
+     traces and settings survive uninstall/reinstall. -->
+<full-backup-content>
+    <include domain="file" path="trips.json" />
+    <include domain="file" path="traces.jsonl" />
+    <include domain="sharedpref" path="settings.xml" />
+    <include domain="sharedpref" path="routing_server.xml" />
+</full-backup-content>

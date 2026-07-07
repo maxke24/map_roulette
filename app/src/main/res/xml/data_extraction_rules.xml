@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Google Drive auto-backup + device-to-device transfer (Android 12+). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="trips.json" />
+        <include domain="file" path="traces.jsonl" />
+        <include domain="sharedpref" path="settings.xml" />
+        <include domain="sharedpref" path="routing_server.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="trips.json" />
+        <include domain="file" path="traces.jsonl" />
+        <include domain="sharedpref" path="settings.xml" />
+        <include domain="sharedpref" path="routing_server.xml" />
+    </device-transfer>
+</data-extraction-rules>

@@ -18,7 +18,10 @@
         android:label="Map Roulette"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.MapRoulette"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules">
 
         <activity
             android:name=".MainActivity"
