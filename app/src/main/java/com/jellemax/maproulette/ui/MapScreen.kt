@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -101,7 +102,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -148,13 +149,29 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     // Reload explored traces when a trip ends.
     LaunchedEffect(stats == null) { if (stats == null) tracesVersion++ }
 
+    // CARTO basemaps (retina): clean modern cartography, light + dark variant.
+    val darkTheme = isSystemInDarkTheme()
+    val tileSource = remember(darkTheme) {
+        val style = if (darkTheme) "dark_all" else "rastertiles/voyager"
+        XYTileSource(
+            if (darkTheme) "CartoDarkMatter" else "CartoVoyager",
+            0, 20, 512, "@2x.png",
+            arrayOf(
+                "https://a.basemaps.cartocdn.com/$style/",
+                "https://b.basemaps.cartocdn.com/$style/",
+                "https://c.basemaps.cartocdn.com/$style/",
+            ),
+            "© OpenStreetMap contributors © CARTO",
+        )
+    }
     val mapView = remember {
         MapView(context).apply {
-            setTileSource(TileSourceFactory.MAPNIK)
+            setTileSource(tileSource)
             setMultiTouchControls(true)
             controller.setZoom(6.0)
         }
     }
+    LaunchedEffect(tileSource) { mapView.setTileSource(tileSource) }
     DisposableEffect(Unit) {
         mapView.onResume()
         onDispose {
