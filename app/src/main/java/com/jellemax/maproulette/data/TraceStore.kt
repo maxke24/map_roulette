@@ -36,5 +36,9 @@ object TraceStore {
         }
     }
 
+    fun clear(context: Context) {
+        file(context).delete()
+    }
+
     private fun file(context: Context) = File(context.filesDir, FILE_NAME)
 }

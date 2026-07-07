@@ -39,7 +39,6 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -50,8 +49,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.Slider
@@ -78,7 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.jellemax.maproulette.BuildConfig
+import com.jellemax.maproulette.R
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
@@ -88,7 +85,7 @@ import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.RouteResult
 import com.jellemax.maproulette.data.RoutingServer
-import com.jellemax.maproulette.data.ServerConfig
+import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
@@ -123,7 +120,7 @@ private val TravelMode.icon: ImageVector
     }
 
 @Composable
-fun MapScreen(onOpenHistory: () -> Unit) {
+fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -135,8 +132,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     var spinning by remember { mutableStateOf(false) }
     var spinJob by remember { mutableStateOf<Job?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var serverConfig by remember { mutableStateOf(RoutingServer.load(context)) }
-    var showSettings by remember { mutableStateOf(false) }
+    val serverConfig = remember { RoutingServer.load(context) }
     var poiKind by rememberSaveable { mutableStateOf(PoiKind.ROAD) }
     var directionDeg by rememberSaveable { mutableStateOf<Float?>(null) }
     var destinationName by remember { mutableStateOf<String?>(null) }
@@ -150,7 +146,13 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     LaunchedEffect(stats == null) { if (stats == null) tracesVersion++ }
 
     // CARTO basemaps (retina): clean modern cartography, light + dark variant.
-    val darkTheme = isSystemInDarkTheme()
+    val themePref by Settings.theme.collectAsStateWithLifecycle()
+    val darkTheme = when (themePref) {
+        Settings.Theme.SYSTEM -> isSystemInDarkTheme()
+        Settings.Theme.LIGHT -> false
+        Settings.Theme.DARK -> true
+    }
+    val fogRadius by Settings.fogRadiusMeters.collectAsStateWithLifecycle()
     val tileSource = remember(darkTheme) {
         val style = if (darkTheme) "dark_all" else "rastertiles/voyager"
         XYTileSource(
@@ -252,7 +254,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
     }
 
     // Redraw overlays whenever location, radius, destination, or route changes.
-    LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg, fogEnabled, traces) {
+    LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
+        fogEnabled, fogRadius, traces) {
         mapView.overlays.clear()
         if (fogEnabled) {
             mapView.overlays.add(FogOverlay(
@@ -260,6 +263,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                 currentLocationProvider = {
                     myLocation?.let { GeoPoint(it.lat, it.lon) }
                 },
+                corridorMeters = fogRadius,
             ))
         }
         val loc = myLocation
@@ -288,7 +292,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             }
             mapView.overlays.add(Marker(mapView).apply {
                 position = center
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                icon = ContextCompat.getDrawable(context, R.drawable.ic_map_dot)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                 title = "You are here"
             })
         }
@@ -296,6 +301,7 @@ fun MapScreen(onOpenHistory: () -> Unit) {
         if (dest != null) {
             mapView.overlays.add(Marker(mapView).apply {
                 position = GeoPoint(dest.lat, dest.lon)
+                icon = ContextCompat.getDrawable(context, R.drawable.ic_map_pin)
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                 title = "Destination"
             })
@@ -441,8 +447,8 @@ fun MapScreen(onOpenHistory: () -> Unit) {
             SmallFloatingActionButton(onClick = onOpenHistory) {
                 Icon(Icons.Default.History, contentDescription = "Trip history")
             }
-            SmallFloatingActionButton(onClick = { showSettings = true }) {
-                Icon(Icons.Default.Settings, contentDescription = "Routing server settings")
+            SmallFloatingActionButton(onClick = onOpenSettings) {
+                Icon(Icons.Default.Settings, contentDescription = "Settings")
             }
             SmallFloatingActionButton(onClick = { fogEnabled = !fogEnabled }) {
                 Icon(
@@ -450,23 +456,6 @@ fun MapScreen(onOpenHistory: () -> Unit) {
                     contentDescription = "Fog of war",
                 )
             }
-        }
-
-        if (showSettings) {
-            ServerSettingsDialog(
-                custom = RoutingServer.loadCustom(context),
-                builtInAvailable = RoutingServer.bakedDefaults().usable,
-                onDismiss = { showSettings = false },
-                onSave = { customConfig ->
-                    if (customConfig == null) {
-                        RoutingServer.clearCustom(context)
-                    } else {
-                        RoutingServer.save(context, customConfig)
-                    }
-                    serverConfig = RoutingServer.load(context)
-                    showSettings = false
-                },
-            )
         }
 
         Column(
@@ -660,78 +649,6 @@ private fun SelectorChip(
             }
         }
     }
-}
-
-/**
- * Settings for a custom GraphHopper server. Built-in defaults are never
- * displayed: empty fields mean the built-in server is used.
- */
-@Composable
-private fun ServerSettingsDialog(
-    custom: ServerConfig?,
-    builtInAvailable: Boolean,
-    onDismiss: () -> Unit,
-    onSave: (ServerConfig?) -> Unit,
-) {
-    var url by remember { mutableStateOf(custom?.url ?: "") }
-    var clientId by remember { mutableStateOf(custom?.clientId ?: "") }
-    var clientSecret by remember { mutableStateOf(custom?.clientSecret ?: "") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Routing server") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    "App v${BuildConfig.VERSION_NAME} · " + when {
-                        custom != null -> "custom server: ${custom.url}"
-                        builtInAvailable -> "using built-in server"
-                        else -> "public servers only"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    "Optional: your own GraphHopper server for spins and round " +
-                        "trips. Leave empty to use the built-in one. Falls back " +
-                        "to public servers when unreachable.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                OutlinedTextField(
-                    value = url, onValueChange = { url = it },
-                    label = { Text("Server URL") },
-                    placeholder = { Text("https://…") },
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    value = clientId, onValueChange = { clientId = it },
-                    label = { Text("CF Access Client Id (optional)") },
-                    singleLine = true,
-                )
-                OutlinedTextField(
-                    value = clientSecret, onValueChange = { clientSecret = it },
-                    label = { Text("CF Access Client Secret (optional)") },
-                    singleLine = true,
-                )
-                if (custom != null) {
-                    TextButton(onClick = { onSave(null) }) {
-                        Text("Remove custom server")
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                onSave(
-                    if (url.isBlank()) null
-                    else ServerConfig(url, clientId, clientSecret, enabled = true)
-                )
-            }) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
 }
 
 /** "Go" button with a chooser for the navigation app. */

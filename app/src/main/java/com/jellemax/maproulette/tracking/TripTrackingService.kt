@@ -29,6 +29,7 @@ import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.MainActivity
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.RoadRoulette
+import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
@@ -127,6 +128,7 @@ class TripTrackingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Settings.init(this)
         createChannel()
         ServiceCompat.startForeground(
             this,
@@ -261,7 +263,9 @@ class TripTrackingService : Service() {
             when (event.transitionType) {
                 ActivityTransition.ACTIVITY_TRANSITION_ENTER -> {
                     pendingStopAtMs = null
-                    if (_stats.value == null) beginTrip(auto = true)
+                    if (_stats.value == null && Settings.autoDetectDrives.value) {
+                        beginTrip(auto = true)
+                    }
                 }
                 ActivityTransition.ACTIVITY_TRANSITION_EXIT -> {
                     // Don't end immediately — could be a fuel stop. Grace
@@ -290,7 +294,7 @@ class TripTrackingService : Service() {
         if (location.accuracy <= 50f) {
             addTracePoint(LatLon(location.latitude, location.longitude))
         }
-        if (speed >= FAST_SPEED_MPS) {
+        if (speed >= FAST_SPEED_MPS && Settings.autoDetectDrives.value) {
             consecutiveFastFixes++
             if (consecutiveFastFixes >= FAST_FIXES_TO_START) beginTrip(auto = true)
         } else {

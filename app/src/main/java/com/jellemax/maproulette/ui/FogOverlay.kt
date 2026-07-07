@@ -20,6 +20,7 @@ import kotlin.math.max
 class FogOverlay(
     private val tracesProvider: () -> List<List<GeoPoint>>,
     private val currentLocationProvider: () -> GeoPoint?,
+    private val corridorMeters: Float = 200f,
 ) : Overlay() {
 
     private val fogColor = Color.argb(150, 8, 10, 26)
@@ -48,8 +49,8 @@ class FogOverlay(
         val bufCanvas = Canvas(buf)
 
         val projection = mapView.projection
-        // Corridor of ~200 m around driven roads, but never thinner than 18 px.
-        val corridorPx = max(18f, projection.metersToPixels(200f))
+        // Corridor around driven roads, but never thinner than 18 px.
+        val corridorPx = max(18f, projection.metersToPixels(corridorMeters))
         clearPaint.strokeWidth = corridorPx
 
         val pt = Point()
@@ -72,7 +73,7 @@ class FogOverlay(
             projection.toPixels(loc, pt)
             bufCanvas.drawCircle(
                 pt.x.toFloat(), pt.y.toFloat(),
-                max(corridorPx, projection.metersToPixels(350f)),
+                max(corridorPx, projection.metersToPixels(corridorMeters * 1.75f)),
                 clearFillPaint,
             )
         }

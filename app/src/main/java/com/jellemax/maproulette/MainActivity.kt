@@ -18,20 +18,29 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.ui.HistoryScreen
 import com.jellemax.maproulette.ui.MapScreen
+import com.jellemax.maproulette.ui.SettingsScreen
 import org.osmdroid.config.Configuration
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        Settings.init(this)
         // osmdroid requires a distinct user agent for its tile servers.
         Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
         Configuration.getInstance().userAgentValue = packageName
         setContent {
             val context = LocalContext.current
-            val dark = isSystemInDarkTheme()
+            val theme by Settings.theme.collectAsStateWithLifecycle()
+            val dark = when (theme) {
+                Settings.Theme.SYSTEM -> isSystemInDarkTheme()
+                Settings.Theme.LIGHT -> false
+                Settings.Theme.DARK -> true
+            }
             // Material You dynamic color on Android 12+, static fallback below.
             val colorScheme = when {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && dark ->
@@ -48,12 +57,17 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class Screen { MAP, HISTORY, SETTINGS }
+
 @Composable
 private fun AppRoot() {
-    var showHistory by remember { mutableStateOf(false) }
-    if (showHistory) {
-        HistoryScreen(onBack = { showHistory = false })
-    } else {
-        MapScreen(onOpenHistory = { showHistory = true })
+    var screen by remember { mutableStateOf(Screen.MAP) }
+    when (screen) {
+        Screen.HISTORY -> HistoryScreen(onBack = { screen = Screen.MAP })
+        Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MAP })
+        Screen.MAP -> MapScreen(
+            onOpenHistory = { screen = Screen.HISTORY },
+            onOpenSettings = { screen = Screen.SETTINGS },
+        )
     }
 }

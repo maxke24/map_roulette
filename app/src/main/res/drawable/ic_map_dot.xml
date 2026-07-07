@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Current-location marker: blue dot, white ring, translucent halo. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="44dp"
+    android:height="44dp"
+    android:viewportWidth="44"
+    android:viewportHeight="44">
+    <path
+        android:fillColor="#334285F4"
+        android:pathData="M22,22m-22,0a22,22 0 1,1 44,0a22,22 0 1,1 -44,0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M22,22m-10,0a10,10 0 1,1 20,0a10,10 0 1,1 -20,0" />
+    <path
+        android:fillColor="#FF4285F4"
+        android:pathData="M22,22m-7,0a7,7 0 1,1 14,0a7,7 0 1,1 -14,0" />
+</vector>
