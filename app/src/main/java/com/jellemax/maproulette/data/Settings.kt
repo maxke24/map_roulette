@@ -12,7 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
  */
 object Settings {
 
-    enum class Theme { SYSTEM, LIGHT, DARK }
+    /** AUTO = light by day, dark by night (sun position at last location). */
+    enum class Theme { SYSTEM, LIGHT, DARK, AUTO }
 
     const val FOG_RADIUS_DEFAULT = 200f
 

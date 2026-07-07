@@ -92,6 +92,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                         )
                     }
                 }
+                if (theme == Settings.Theme.AUTO) {
+                    Text(
+                        "Light by day, dark by night — follows sunrise and " +
+                            "sunset at your location.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
 
             SettingsSection("Tracking") {

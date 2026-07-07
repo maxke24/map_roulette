@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -164,11 +163,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
 
     // CARTO basemaps (retina): clean modern cartography, light + dark variant.
     val themePref by Settings.theme.collectAsStateWithLifecycle()
-    val darkTheme = when (themePref) {
-        Settings.Theme.SYSTEM -> isSystemInDarkTheme()
-        Settings.Theme.LIGHT -> false
-        Settings.Theme.DARK -> true
-    }
+    val darkTheme = isAppDarkTheme(themePref)
     val fogRadius by Settings.fogRadiusMeters.collectAsStateWithLifecycle()
     val tileSource = remember(darkTheme) {
         val style = if (darkTheme) "dark_all" else "rastertiles/voyager"

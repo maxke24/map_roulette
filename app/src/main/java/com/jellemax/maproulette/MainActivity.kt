@@ -5,7 +5,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
@@ -23,6 +22,7 @@ import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.ui.HistoryScreen
 import com.jellemax.maproulette.ui.MapScreen
 import com.jellemax.maproulette.ui.SettingsScreen
+import com.jellemax.maproulette.ui.isAppDarkTheme
 import org.osmdroid.config.Configuration
 
 class MainActivity : ComponentActivity() {
@@ -36,11 +36,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val context = LocalContext.current
             val theme by Settings.theme.collectAsStateWithLifecycle()
-            val dark = when (theme) {
-                Settings.Theme.SYSTEM -> isSystemInDarkTheme()
-                Settings.Theme.LIGHT -> false
-                Settings.Theme.DARK -> true
-            }
+            val dark = isAppDarkTheme(theme)
             // Material You dynamic color on Android 12+, static fallback below.
             val colorScheme = when {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && dark ->
