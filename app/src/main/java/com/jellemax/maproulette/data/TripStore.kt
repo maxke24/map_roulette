@@ -62,5 +62,17 @@ object TripStore {
         }
     }
 
+    /** Raw stored JSON array, for server sync. */
+    fun rawJson(context: Context): String {
+        val f = file(context)
+        return if (f.exists()) f.readText() else "[]"
+    }
+
+    /** Overwrite the store with a merged JSON array from the sync server. */
+    fun replaceRaw(context: Context, json: String) {
+        JSONArray(json) // validate before overwriting
+        file(context).writeText(json)
+    }
+
     private fun file(context: Context) = File(context.filesDir, FILE_NAME)
 }

@@ -30,6 +30,7 @@ import com.jellemax.maproulette.MainActivity
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.Settings
+import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
@@ -190,6 +191,7 @@ class TripTrackingService : Service() {
                     destinationLon = destLon,
                 ),
             )
+            SyncClient.syncQuietly(this)
         }
         _stats.value = null
         destLat = null

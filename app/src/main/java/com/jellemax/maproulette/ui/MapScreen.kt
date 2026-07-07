@@ -86,6 +86,7 @@ import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.RouteResult
 import com.jellemax.maproulette.data.RoutingServer
 import com.jellemax.maproulette.data.Settings
+import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
@@ -144,6 +145,22 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
     // Reload explored traces when a trip ends.
     LaunchedEffect(stats == null) { if (stats == null) tracesVersion++ }
+
+    // Pull from the sync server on launch: restores everything after a
+    // reinstall and picks up trips recorded while the app was closed.
+    LaunchedEffect(Unit) {
+        if (SyncClient.configured) {
+            val synced = withContext(Dispatchers.IO) {
+                try {
+                    SyncClient.sync(context)
+                    true
+                } catch (e: Exception) {
+                    false // offline or server down; next launch catches up
+                }
+            }
+            if (synced) tracesVersion++
+        }
+    }
 
     // CARTO basemaps (retina): clean modern cartography, light + dark variant.
     val themePref by Settings.theme.collectAsStateWithLifecycle()

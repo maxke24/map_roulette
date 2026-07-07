@@ -33,6 +33,8 @@ android {
             "\"${routingCfg("routing.cfId", "ROUTING_CF_ID")}\"")
         buildConfigField("String", "ROUTING_CF_SECRET",
             "\"${routingCfg("routing.cfSecret", "ROUTING_CF_SECRET")}\"")
+        buildConfigField("String", "SYNC_URL",
+            "\"${routingCfg("sync.url", "SYNC_SERVER_URL")}\"")
     }
 
     buildTypes {

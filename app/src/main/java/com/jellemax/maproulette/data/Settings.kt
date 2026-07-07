@@ -27,6 +27,10 @@ object Settings {
     private val _fogRadiusMeters = MutableStateFlow(FOG_RADIUS_DEFAULT)
     val fogRadiusMeters: StateFlow<Float> = _fogRadiusMeters
 
+    /** User-entered sync server URL; blank = use the baked-in default. */
+    private val _syncUrl = MutableStateFlow("")
+    val syncUrl: StateFlow<String> = _syncUrl
+
     fun init(context: Context) {
         if (::prefs.isInitialized) return
         prefs = context.applicationContext
@@ -36,6 +40,7 @@ object Settings {
         }.getOrDefault(Theme.SYSTEM)
         _autoDetectDrives.value = prefs.getBoolean("auto_detect_drives", true)
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
+        _syncUrl.value = prefs.getString("sync_url", "") ?: ""
     }
 
     fun setTheme(value: Theme) {
@@ -51,5 +56,10 @@ object Settings {
     fun setFogRadiusMeters(value: Float) {
         _fogRadiusMeters.value = value
         prefs.edit().putFloat("fog_radius_m", value).apply()
+    }
+
+    fun setSyncUrl(value: String) {
+        _syncUrl.value = value.trim()
+        prefs.edit().putString("sync_url", value.trim()).apply()
     }
 }

@@ -40,5 +40,17 @@ object TraceStore {
         file(context).delete()
     }
 
+    /** Raw JSONL lines, for server sync. */
+    fun rawLines(context: Context): List<String> {
+        val f = file(context)
+        return if (f.exists()) f.readLines().filter { it.isNotBlank() } else emptyList()
+    }
+
+    /** Overwrite the store with merged lines from the sync server. */
+    fun replaceLines(context: Context, lines: List<String>) {
+        file(context).writeText(
+            lines.filter { it.isNotBlank() }.joinToString("\n", postfix = "\n"))
+    }
+
     private fun file(context: Context) = File(context.filesDir, FILE_NAME)
 }

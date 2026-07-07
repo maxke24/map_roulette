@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,7 +42,11 @@ import com.jellemax.maproulette.BuildConfig
 import com.jellemax.maproulette.data.RoutingServer
 import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.Settings
+import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -133,6 +138,8 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             ServerSection()
 
+            SyncSection()
+
             Text(
                 "Map Roulette v${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodySmall,
@@ -156,6 +163,61 @@ fun SettingsScreen(onBack: () -> Unit) {
                 TextButton(onClick = { confirmReset = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+/** Backup sync with the owner's server (see server/SYNC_SETUP_GUIDE.md). */
+@Composable
+private fun SyncSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val syncUrl by Settings.syncUrl.collectAsStateWithLifecycle()
+    var urlField by remember { mutableStateOf(syncUrl) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var syncing by remember { mutableStateOf(false) }
+
+    SettingsSection("Backup sync") {
+        Text(
+            "Trips and explored area are merged with your server after every " +
+                "trip and on app start, so a reinstall restores everything. " +
+                "Uses the routing server's Cloudflare Access credentials.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        OutlinedTextField(
+            value = urlField, onValueChange = { urlField = it },
+            label = { Text("Sync server URL") },
+            placeholder = { Text("https://…") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = {
+                Settings.setSyncUrl(urlField)
+                status = "Saved"
+            }) { Text("Save") }
+            TextButton(
+                enabled = !syncing && SyncClient.configured,
+                onClick = {
+                    syncing = true
+                    status = "Syncing…"
+                    scope.launch {
+                        status = withContext(Dispatchers.IO) {
+                            try {
+                                val r = SyncClient.sync(context)
+                                "Synced: ${r.trips} trips, ${r.traces} trace segments"
+                            } catch (e: Exception) {
+                                "Sync failed: ${e.message}"
+                            }
+                        }
+                        syncing = false
+                    }
+                },
+            ) { Text("Sync now") }
+        }
+        status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
