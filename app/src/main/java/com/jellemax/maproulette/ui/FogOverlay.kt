@@ -48,8 +48,8 @@ class FogOverlay(
         val bufCanvas = Canvas(buf)
 
         val projection = mapView.projection
-        // Corridor of ~120 m around driven roads, but never thinner than 14 px.
-        val corridorPx = max(14f, projection.metersToPixels(120f))
+        // Corridor of ~200 m around driven roads, but never thinner than 18 px.
+        val corridorPx = max(18f, projection.metersToPixels(200f))
         clearPaint.strokeWidth = corridorPx
 
         val pt = Point()
@@ -72,7 +72,7 @@ class FogOverlay(
             projection.toPixels(loc, pt)
             bufCanvas.drawCircle(
                 pt.x.toFloat(), pt.y.toFloat(),
-                max(corridorPx, projection.metersToPixels(250f)),
+                max(corridorPx, projection.metersToPixels(350f)),
                 clearFillPaint,
             )
         }
