@@ -17,6 +17,8 @@ object NavEngine {
         val distanceToTurnMeters: Double,
         val remainingMeters: Double,
         val remainingTimeMs: Long?,
+        /** Posted speed limit on the road segment closest to the current position. */
+        val speedLimitKmh: Double?,
     )
 
     /** Where [pos] is along [route]: snap to the nearest segment, then derive
@@ -70,6 +72,29 @@ object NavEngine {
             remainingTimeMs = route.timeMs?.let {
                 if (total > 0) (it * remaining / total).toLong() else null
             },
+            speedLimitKmh = route.speedLimits
+                .firstOrNull { bestIndex >= it.fromIndex && bestIndex < it.toIndex }
+                ?.kmh,
         )
+    }
+
+    /**
+     * Map camera zoom while navigating: zoomed out at speed so you see further
+     * ahead, zoomed in near a turn so the maneuver is legible.
+     */
+    fun cameraZoom(speedMps: Double, distanceToTurnMeters: Double): Double {
+        val speedZoom = when {
+            speedMps < 3.0 -> 18.0   // stopped / walking pace
+            speedMps < 8.0 -> 17.0   // city streets
+            speedMps < 14.0 -> 16.0  // arterial
+            speedMps < 22.0 -> 15.0  // fast road
+            else -> 14.0             // highway
+        }
+        val turnBoost = when {
+            distanceToTurnMeters < 60.0 -> 2.0
+            distanceToTurnMeters < 150.0 -> 1.0
+            else -> 0.0
+        }
+        return min(18.0, speedZoom + turnBoost)
     }
 }

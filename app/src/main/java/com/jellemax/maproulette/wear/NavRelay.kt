@@ -12,7 +12,7 @@ object NavRelay {
     private var lastSentAt = 0L
     private var lastSign: Int? = null
 
-    fun send(context: Context, progress: NavEngine.Progress) {
+    fun send(context: Context, progress: NavEngine.Progress, currentSpeedKmh: Double) {
         val instruction = progress.nextInstruction
         val now = System.currentTimeMillis()
         // Throttle: only push on a new maneuver, or at most once/second otherwise.
@@ -24,6 +24,8 @@ object NavRelay {
             put("sign", instruction?.sign ?: 0)
             put("text", instruction?.text ?: "")
             put("distanceToTurnMeters", progress.distanceToTurnMeters)
+            put("speedKmh", currentSpeedKmh)
+            put("speedLimitKmh", progress.speedLimitKmh ?: JSONObject.NULL)
         }.toString().toByteArray()
         broadcast(context, payload)
     }

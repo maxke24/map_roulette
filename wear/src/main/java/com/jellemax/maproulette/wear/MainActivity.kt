@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ForkLeft
 import androidx.compose.material.icons.filled.ForkRight
@@ -26,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -42,6 +44,8 @@ private const val NAV_PATH = "/nav"
 private data class NavState(
     val sign: Int,
     val distanceToTurnMeters: Double,
+    val speedKmh: Double,
+    val speedLimitKmh: Double?,
 )
 
 /** GraphHopper sign code -> maneuver arrow (mirrors phone app's ui/Navigation.kt). */
@@ -74,6 +78,8 @@ class MainActivity : ComponentActivity() {
         navState = if (json.has("stop")) null else NavState(
             sign = json.optInt("sign"),
             distanceToTurnMeters = json.optDouble("distanceToTurnMeters"),
+            speedKmh = json.optDouble("speedKmh"),
+            speedLimitKmh = if (json.isNull("speedLimitKmh")) null else json.optDouble("speedLimitKmh"),
         )
     }
 
@@ -104,12 +110,26 @@ private fun NavScreen(state: NavState?) {
             Icon(
                 signIcon(state?.sign ?: 0),
                 contentDescription = null,
-                modifier = Modifier.padding(bottom = 12.dp),
+                tint = MaterialTheme.colors.primary,
+                modifier = Modifier
+                    .size(88.dp)
+                    .padding(bottom = 12.dp),
             )
             Text(
                 state?.let { formatDistance(it.distanceToTurnMeters) } ?: "No route",
-                style = MaterialTheme.typography.display2,
+                style = MaterialTheme.typography.display1,
             )
+            state?.let {
+                // Over the limit by more than a small GPS-noise margin turns this red;
+                // no limit number shown, so it stays a glance, not a read.
+                val speeding = it.speedLimitKmh?.let { limit -> it.speedKmh > limit + 5 } ?: false
+                Text(
+                    "%.0f".format(it.speedKmh),
+                    style = MaterialTheme.typography.caption1,
+                    color = if (speeding) Color(0xFFE53935) else MaterialTheme.colors.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
         }
     }
 }

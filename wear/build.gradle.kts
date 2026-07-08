@@ -9,7 +9,10 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.jellemax.maproulette.wear"
+        // MessageClient.sendMessage() routes by matching applicationId across
+        // the phone/watch node pair — must equal the phone app's id or the
+        // system silently drops every message ("Failed to deliver to AppKey").
+        applicationId = "com.jellemax.maproulette"
         minSdk = 30
         targetSdk = 35
         versionCode = 19

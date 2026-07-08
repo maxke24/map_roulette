@@ -20,7 +20,12 @@ data class RouteResult(
     val instructions: List<NavInstruction> = emptyList(),
     /** Estimated travel time, if the router reported it. */
     val timeMs: Long? = null,
+    /** Posted speed limit per polyline segment range, if the router reported it. */
+    val speedLimits: List<SpeedLimitSegment> = emptyList(),
 )
+
+/** Posted speed limit (km/h) for polyline[fromIndex until toIndex]; null where unknown. */
+data class SpeedLimitSegment(val fromIndex: Int, val toIndex: Int, val kmh: Double?)
 
 /** One GraphHopper turn instruction; indices point into the polyline. */
 data class NavInstruction(
@@ -126,7 +131,7 @@ object RoutingServer {
             "&round_trip.distance=${distanceMeters.toInt()}" +
             "&round_trip.seed=$seed" +
             (headingDeg?.let { "&heading=${it.toInt()}" } ?: "") +
-            "&points_encoded=false",
+            "&points_encoded=false&details=max_speed",
     )
 
     /**
@@ -148,7 +153,7 @@ object RoutingServer {
                     "/route?profile=$profile" +
                     "&point=${from.lat},${from.lon}" +
                     "&point=${to.lat},${to.lon}" +
-                    "&points_encoded=false",
+                    "&points_encoded=false&details=max_speed",
             )
         }
         // Custom models require a POST request (and flexible routing).
@@ -158,6 +163,7 @@ object RoutingServer {
                 .put(JSONArray().put(from.lon).put(from.lat))
                 .put(JSONArray().put(to.lon).put(to.lat)))
             .put("points_encoded", false)
+            .put("details", JSONArray().put("max_speed"))
             .put("ch.disable", true)
             .put("custom_model", JSONObject().put("priority", JSONArray().put(
                 JSONObject()
@@ -224,12 +230,24 @@ object RoutingServer {
                 ))
             }
         }
+        val speedLimits = ArrayList<SpeedLimitSegment>()
+        path.optJSONObject("details")?.optJSONArray("max_speed")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val seg = arr.getJSONArray(i)
+                speedLimits.add(SpeedLimitSegment(
+                    fromIndex = seg.getInt(0),
+                    toIndex = seg.getInt(1),
+                    kmh = if (seg.isNull(2)) null else seg.getDouble(2),
+                ))
+            }
+        }
         return RouteResult(
             polyline = polyline,
             waypoints = sampleInterior(polyline, 8),
             distanceMeters = path.optDouble("distance").takeIf { !it.isNaN() },
             instructions = instructions,
             timeMs = path.optLong("time").takeIf { it > 0 },
+            speedLimits = speedLimits,
         )
     }
 

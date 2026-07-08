@@ -1,11 +1,16 @@
 package com.jellemax.maproulette.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ForkLeft
@@ -30,9 +35,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.jellemax.maproulette.data.NavEngine
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -71,14 +80,15 @@ fun NavigationBanner(
     ) {
         Row(
             Modifier.padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            SpeedLimitSign(progress?.speedLimitKmh)
             val instruction = progress?.nextInstruction
             Icon(
                 signIcon(instruction?.sign ?: 0),
                 contentDescription = null,
-                Modifier.size(44.dp),
+                Modifier.size(64.dp),
             )
             Column {
                 Text(
@@ -87,12 +97,12 @@ fun NavigationBanner(
                         progress == null -> "Waiting for GPS…"
                         else -> formatDistanceKm(progress.distanceToTurnMeters)
                     },
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
                     instruction?.text ?: "",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.titleMedium,
                     maxLines = 2,
                 )
             }
@@ -148,3 +158,25 @@ fun NavigationBottomBar(
 private fun eta(remainingMs: Long): String =
     SimpleDateFormat("HH:mm", Locale.getDefault())
         .format(Date(System.currentTimeMillis() + remainingMs))
+
+/** EU-style round speed limit sign: white disc, thick red ring, big black number. */
+@Composable
+fun SpeedLimitSign(kmh: Double?, modifier: Modifier = Modifier) {
+    if (kmh == null) return
+    Box(
+        modifier
+            .size(64.dp)
+            .clip(CircleShape)
+            .background(Color.White)
+            .border(BorderStroke(5.dp, Color(0xFFD32F2F)), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            kmh.toInt().toString(),
+            color = Color.Black,
+            fontWeight = FontWeight.Black,
+            fontSize = 24.sp,
+            textAlign = TextAlign.Center,
+        )
+    }
+}

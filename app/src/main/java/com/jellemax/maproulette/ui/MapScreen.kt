@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
+import android.graphics.Paint as AndroidPaint
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +33,8 @@ import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.LocationSearching
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
@@ -167,6 +170,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     var navProgress by remember { mutableStateOf<NavEngine.Progress?>(null) }
     var rerouting by remember { mutableStateOf(false) }
     var lastRerouteMs by remember { mutableLongStateOf(0L) }
+    var lastCenteredPos by remember { mutableStateOf<LatLon?>(null) }
+    var followMe by remember { mutableStateOf(false) }
 
     LaunchedEffect(liveFix) {
         liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
@@ -364,10 +369,19 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         }
         val loop = route
         if (loop != null) {
+            val points = loop.polyline.map { GeoPoint(it.lat, it.lon) }
+            // Dark casing under the colored line so the route reads clearly over any basemap.
             mapView.overlays.add(Polyline(mapView).apply {
-                setPoints(loop.polyline.map { GeoPoint(it.lat, it.lon) })
-                outlinePaint.color = AndroidColor.argb(160, 233, 30, 99)
-                outlinePaint.strokeWidth = 6f
+                setPoints(points)
+                outlinePaint.color = AndroidColor.argb(200, 0, 0, 0)
+                outlinePaint.strokeWidth = 16f
+                outlinePaint.strokeCap = AndroidPaint.Cap.ROUND
+            })
+            mapView.overlays.add(Polyline(mapView).apply {
+                setPoints(points)
+                outlinePaint.color = AndroidColor.argb(255, 233, 30, 99)
+                outlinePaint.strokeWidth = 10f
+                outlinePaint.strokeCap = AndroidPaint.Cap.ROUND
             })
         }
         mapView.invalidate()
@@ -416,6 +430,22 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         }
     }
 
+    // Recenter on the rider while driving with no destination set — same jitter
+    // guard as turn-by-turn, but no route progress/reroute logic.
+    LaunchedEffect(followMe, navigating, liveFix) {
+        if (!followMe || navigating) return@LaunchedEffect
+        val fix = liveFix ?: return@LaunchedEffect
+        val pos = LatLon(fix.lat, fix.lon)
+        val moved = lastCenteredPos?.let { RoadRoulette.distanceMeters(it, pos) } ?: Double.MAX_VALUE
+        if (moved > 3.0) {
+            mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), mapView.zoomLevelDouble.coerceAtLeast(15.0), 350L)
+            lastCenteredPos = pos
+        }
+        if (fix.bearingDeg != null && fix.speedMps > 2.0) {
+            mapView.mapOrientation = -fix.bearingDeg
+        }
+    }
+
     // Follow the route while navigating: progress, camera, arrival, reroute.
     LaunchedEffect(navigating, liveFix, route) {
         if (!navigating) return@LaunchedEffect
@@ -424,9 +454,18 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         val pos = LatLon(fix.lat, fix.lon)
         val progress = NavEngine.progress(r, pos) ?: return@LaunchedEffect
         navProgress = progress
-        NavRelay.send(context, progress)
+        NavRelay.send(context, progress, currentSpeedKmh = fix.speedMps * 3.6)
 
-        mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), 17.0, 800L)
+        // GPS fixes can arrive faster than a full-length animation completes (min
+        // interval 500ms vs the old 800ms flight), which restarted the animation
+        // mid-flight and looked choppy. A shorter flight avoids the overlap, and
+        // skipping sub-3m moves ignores GPS jitter while stopped at a light.
+        val moved = lastCenteredPos?.let { RoadRoulette.distanceMeters(it, pos) } ?: Double.MAX_VALUE
+        if (moved > 3.0) {
+            val zoom = NavEngine.cameraZoom(fix.speedMps, progress.distanceToTurnMeters)
+            mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), zoom, 350L)
+            lastCenteredPos = pos
+        }
         if (fix.bearingDeg != null && fix.speedMps > 2.0) {
             // Heading-up while moving; osmdroid rotates counterclockwise.
             mapView.mapOrientation = -fix.bearingDeg
@@ -606,6 +645,13 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                SmallFloatingActionButton(onClick = { followMe = !followMe }) {
+                    Icon(
+                        if (followMe) Icons.Default.MyLocation else Icons.Default.LocationSearching,
+                        contentDescription = if (followMe) "Stop following my location"
+                            else "Follow my location",
+                    )
+                }
                 SmallFloatingActionButton(onClick = { searchOpen = true }) {
                     Icon(Icons.Default.Search, contentDescription = "Search destination")
                 }
