@@ -837,6 +837,25 @@ private fun SearchDialog(
         }
     }
 
+    // Live suggestions as the user types, debounced so we don't hammer Nominatim per keystroke.
+    LaunchedEffect(query) {
+        if (query.length < 3) {
+            results = emptyList()
+            error = null
+            return@LaunchedEffect
+        }
+        delay(400)
+        searching = true
+        error = null
+        try {
+            results = withContext(Dispatchers.IO) { Geocoder.search(query, near) }
+            if (results.isEmpty()) error = "No results"
+        } catch (e: Exception) {
+            error = e.message ?: "Search failed"
+        }
+        searching = false
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Where to?") },
