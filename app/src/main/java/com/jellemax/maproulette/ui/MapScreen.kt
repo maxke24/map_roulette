@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +24,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
@@ -33,11 +36,13 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -48,12 +53,14 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -70,6 +77,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -78,6 +86,8 @@ import com.jellemax.maproulette.R
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.ExploredArea
+import com.jellemax.maproulette.data.GeocodeResult
+import com.jellemax.maproulette.data.Geocoder
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.NavEngine
 import com.jellemax.maproulette.data.PoiKind
@@ -101,11 +111,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import kotlin.random.Random
+import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
@@ -139,6 +151,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     var directionDeg by rememberSaveable { mutableStateOf<Float?>(null) }
     var destinationName by remember { mutableStateOf<String?>(null) }
     var fogEnabled by rememberSaveable { mutableStateOf(false) }
+    var searchOpen by remember { mutableStateOf(false) }
     // Stored traces reload on every store write; the live trace and fix come
     // straight from the tracking service, so fog and position update in real
     // time instead of only when a trip is saved.
@@ -283,6 +296,19 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
         fogEnabled, fogRadius, traces, liveTrace, navigating) {
         mapView.overlays.clear()
+        if (!navigating) {
+            // Long-press drops a destination pin anywhere.
+            mapView.overlays.add(MapEventsOverlay(object : MapEventsReceiver {
+                override fun singleTapConfirmedHelper(p: GeoPoint?) = false
+                override fun longPressHelper(p: GeoPoint?): Boolean {
+                    if (p == null) return false
+                    destination = LatLon(p.latitude, p.longitude)
+                    destinationName = "Dropped pin"
+                    route = null
+                    return true
+                }
+            }))
+        }
         if (fogEnabled) {
             val live = liveTrace.map { GeoPoint(it.lat, it.lon) }
             val all = if (live.size >= 2) traces + listOf(live) else traces
@@ -577,6 +603,9 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                SmallFloatingActionButton(onClick = { searchOpen = true }) {
+                    Icon(Icons.Default.Search, contentDescription = "Search destination")
+                }
                 SmallFloatingActionButton(onClick = onOpenHistory) {
                     Icon(Icons.Default.History, contentDescription = "Trip history")
                 }
@@ -761,6 +790,91 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             }
         }
     }
+
+    if (searchOpen) {
+        SearchDialog(
+            near = myLocation,
+            onPick = { r ->
+                searchOpen = false
+                destination = r.location
+                destinationName = r.name
+                route = null
+                mapView.controller.animateTo(
+                    GeoPoint(r.location.lat, r.location.lon), 14.0, 800L)
+            },
+            onDismiss = { searchOpen = false },
+        )
+    }
+}
+
+/** Address/place search; a picked result becomes the destination. */
+@Composable
+private fun SearchDialog(
+    near: LatLon?,
+    onPick: (GeocodeResult) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var query by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<GeocodeResult>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun run() {
+        if (query.isBlank() || searching) return
+        searching = true
+        error = null
+        scope.launch {
+            try {
+                results = withContext(Dispatchers.IO) { Geocoder.search(query, near) }
+                if (results.isEmpty()) error = "No results"
+            } catch (e: Exception) {
+                error = e.message ?: "Search failed"
+            }
+            searching = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Where to?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Address or place") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { run() }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (searching) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                }
+                error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                results.forEach { r ->
+                    Text(
+                        r.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(r) }
+                            .padding(vertical = 10.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { run() }, enabled = !searching) { Text("Search") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 /** Compact dropdown selector for destination kind and direction. */
