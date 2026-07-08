@@ -78,6 +78,7 @@ import com.jellemax.maproulette.R
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.LatLon
+import com.jellemax.maproulette.data.NavEngine
 import com.jellemax.maproulette.data.PoiKind
 import com.jellemax.maproulette.data.PoiRoulette
 import com.jellemax.maproulette.data.RoadRoulette
@@ -147,6 +148,11 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
     val liveFix by TripTrackingService.lastFix.collectAsStateWithLifecycle()
     val liveTrace by TripTrackingService.liveTrace.collectAsStateWithLifecycle()
+
+    var navigating by remember { mutableStateOf(false) }
+    var navProgress by remember { mutableStateOf<NavEngine.Progress?>(null) }
+    var rerouting by remember { mutableStateOf(false) }
+    var lastRerouteMs by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(liveFix) {
         liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
@@ -274,7 +280,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
 
     // Redraw overlays whenever location, radius, destination, or route changes.
     LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
-        fogEnabled, fogRadius, traces, liveTrace) {
+        fogEnabled, fogRadius, traces, liveTrace, navigating) {
         mapView.overlays.clear()
         if (fogEnabled) {
             val live = liveTrace.map { GeoPoint(it.lat, it.lon) }
@@ -291,25 +297,27 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         if (loc != null) {
             val center = GeoPoint(loc.lat, loc.lon)
             val reachMeters = if (mode.roundTrip) radiusKm * 250.0 else radiusKm * 1000.0
-            mapView.overlays.add(Polygon(mapView).apply {
-                // For round trips the slider is trip length; reach ≈ length / 4.
-                points = Polygon.pointsAsCircle(center, reachMeters)
-                outlinePaint.color = AndroidColor.argb(180, 33, 150, 243)
-                outlinePaint.strokeWidth = 3f
-                fillPaint.color = AndroidColor.argb(24, 33, 150, 243)
-            })
-            directionDeg?.let { dir ->
-                // Wedge showing the chosen spin direction (±45°).
-                val arc = (-45..45 step 5).map { d ->
-                    GeoPoint(loc.lat, loc.lon).destinationPoint(
-                        reachMeters, (dir + d).toDouble())
-                }
+            if (!navigating) {
                 mapView.overlays.add(Polygon(mapView).apply {
-                    points = listOf(center) + arc + center
-                    outlinePaint.color = AndroidColor.argb(150, 255, 152, 0)
-                    outlinePaint.strokeWidth = 2f
-                    fillPaint.color = AndroidColor.argb(28, 255, 152, 0)
+                    // For round trips the slider is trip length; reach ≈ length / 4.
+                    points = Polygon.pointsAsCircle(center, reachMeters)
+                    outlinePaint.color = AndroidColor.argb(180, 33, 150, 243)
+                    outlinePaint.strokeWidth = 3f
+                    fillPaint.color = AndroidColor.argb(24, 33, 150, 243)
                 })
+                directionDeg?.let { dir ->
+                    // Wedge showing the chosen spin direction (±45°).
+                    val arc = (-45..45 step 5).map { d ->
+                        GeoPoint(loc.lat, loc.lon).destinationPoint(
+                            reachMeters, (dir + d).toDouble())
+                    }
+                    mapView.overlays.add(Polygon(mapView).apply {
+                        points = listOf(center) + arc + center
+                        outlinePaint.color = AndroidColor.argb(150, 255, 152, 0)
+                        outlinePaint.strokeWidth = 2f
+                        fillPaint.color = AndroidColor.argb(28, 255, 152, 0)
+                    })
+                }
             }
             mapView.overlays.add(Marker(mapView).apply {
                 position = center
@@ -336,6 +344,94 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             })
         }
         mapView.invalidate()
+    }
+
+    fun stopNavigation() {
+        navigating = false
+        navProgress = null
+        mapView.mapOrientation = 0f
+        mapView.invalidate()
+    }
+
+    fun startNavigation() {
+        val loc = myLocation ?: run {
+            error = "Waiting for your location…"
+            return
+        }
+        if (stats == null) {
+            TripTrackingService.start(context, destination?.lat, destination?.lon)
+        }
+        error = null
+        val dest = destination
+        if (dest == null) {
+            // Round trip: the spin already fetched the loop with instructions.
+            if (route?.instructions?.isNotEmpty() == true) {
+                navigating = true
+            } else {
+                error = "No turn data for this loop — spin again with the routing server reachable"
+            }
+            return
+        }
+        rerouting = true
+        scope.launch {
+            try {
+                route = withContext(Dispatchers.IO) {
+                    RoutingServer.route(serverConfig, loc, dest)
+                }
+                navigating = true
+            } catch (e: Exception) {
+                error = "Navigation failed: ${e.message}"
+            } finally {
+                rerouting = false
+            }
+        }
+    }
+
+    // Follow the route while navigating: progress, camera, arrival, reroute.
+    LaunchedEffect(navigating, liveFix, route) {
+        if (!navigating) return@LaunchedEffect
+        val fix = liveFix ?: return@LaunchedEffect
+        val r = route ?: return@LaunchedEffect
+        val pos = LatLon(fix.lat, fix.lon)
+        val progress = NavEngine.progress(r, pos) ?: return@LaunchedEffect
+        navProgress = progress
+
+        mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), 17.0, 800L)
+        if (fix.bearingDeg != null && fix.speedMps > 2.0) {
+            // Heading-up while moving; osmdroid rotates counterclockwise.
+            mapView.mapOrientation = -fix.bearingDeg
+        }
+
+        // Arrived (point-to-point; loops end back at the start on their own).
+        if (destination != null && progress.remainingMeters < 40 &&
+            progress.offRouteMeters < 60
+        ) {
+            stopNavigation()
+            return@LaunchedEffect
+        }
+
+        // Off route → fresh route to the destination. Launched on the screen
+        // scope so the next GPS fix doesn't cancel the request; loops keep
+        // their drawn line (rerouting a loop would change the whole trip).
+        val dest = destination
+        val now = System.currentTimeMillis()
+        if (dest != null && progress.offRouteMeters > 60 &&
+            !rerouting && now - lastRerouteMs > 15_000
+        ) {
+            rerouting = true
+            lastRerouteMs = now
+            scope.launch {
+                try {
+                    route = withContext(Dispatchers.IO) {
+                        RoutingServer.route(serverConfig, pos, dest)
+                    }
+                } catch (e: Exception) {
+                    // stay on the old line; retried after the cooldown
+                } finally {
+                    rerouting = false
+                }
+            }
+        }
     }
 
     fun spin() {
@@ -458,24 +554,36 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     Box(Modifier.fillMaxSize()) {
         AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
 
-        Column(
-            Modifier
-                .align(Alignment.TopEnd)
-                .statusBarsPadding()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            SmallFloatingActionButton(onClick = onOpenHistory) {
-                Icon(Icons.Default.History, contentDescription = "Trip history")
-            }
-            SmallFloatingActionButton(onClick = onOpenSettings) {
-                Icon(Icons.Default.Settings, contentDescription = "Settings")
-            }
-            SmallFloatingActionButton(onClick = { fogEnabled = !fogEnabled }) {
-                Icon(
-                    if (fogEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                    contentDescription = "Fog of war",
-                )
+        if (navigating) {
+            NavigationBanner(
+                progress = navProgress,
+                rerouting = rerouting,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(12.dp),
+            )
+        } else {
+            Column(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SmallFloatingActionButton(onClick = onOpenHistory) {
+                    Icon(Icons.Default.History, contentDescription = "Trip history")
+                }
+                SmallFloatingActionButton(onClick = onOpenSettings) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+                }
+                SmallFloatingActionButton(onClick = { fogEnabled = !fogEnabled }) {
+                    Icon(
+                        if (fogEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                        contentDescription = "Fog of war",
+                    )
+                }
             }
         }
 
@@ -489,7 +597,11 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         ) {
             stats?.let { ActiveTripCard(it) }
 
-            Card(
+            if (navigating) NavigationBottomBar(
+                progress = navProgress,
+                offRoute = (navProgress?.offRouteMeters ?: 0.0) > 60,
+                onExit = { stopNavigation() },
+            ) else Card(
                 shape = MaterialTheme.shapes.extraLarge,
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -602,6 +714,10 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                             route = route?.waypoints,
                             origin = myLocation,
                             mode = mode,
+                            inAppAvailable = serverConfig.usable &&
+                                (destination != null ||
+                                    route?.instructions?.isNotEmpty() == true),
+                            onNavigateInApp = { startNavigation() },
                             onNavigate = {
                                 // Heading out = start tracking automatically.
                                 if (stats == null) {
@@ -679,6 +795,8 @@ private fun NavButton(
     route: List<LatLon>?,
     origin: LatLon?,
     mode: TravelMode,
+    inAppAvailable: Boolean,
+    onNavigateInApp: () -> Unit,
     onNavigate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -695,6 +813,15 @@ private fun NavButton(
             Text("Go", maxLines = 1)
         }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            if (inAppAvailable) {
+                DropdownMenuItem(
+                    text = { Text("Navigate in app") },
+                    onClick = {
+                        menuOpen = false
+                        onNavigateInApp()
+                    },
+                )
+            }
             if (route != null && origin != null) {
                 // Waze can't take multi-waypoint routes; Google Maps only.
                 DropdownMenuItem(

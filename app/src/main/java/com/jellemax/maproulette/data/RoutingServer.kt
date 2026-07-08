@@ -15,6 +15,20 @@ data class RouteResult(
     val waypoints: List<LatLon>,
     /** Total loop length, if the router reported it. */
     val distanceMeters: Double?,
+    /** Turn-by-turn instructions; empty when not from GraphHopper. */
+    val instructions: List<NavInstruction> = emptyList(),
+    /** Estimated travel time, if the router reported it. */
+    val timeMs: Long? = null,
+)
+
+/** One GraphHopper turn instruction; indices point into the polyline. */
+data class NavInstruction(
+    val text: String,
+    val distanceMeters: Double,
+    /** GraphHopper sign code: -3..3 turns, 0 straight, 4 finish, 6 roundabout… */
+    val sign: Int,
+    val startIndex: Int,
+    val endIndex: Int,
 )
 
 data class ServerConfig(
@@ -102,16 +116,29 @@ object RoutingServer {
         distanceMeters: Double,
         seed: Long,
         headingDeg: Double?,
-    ): RouteResult {
-        val url = config.url.trimEnd('/') +
+    ): RouteResult = fetchRoute(
+        config,
+        config.url.trimEnd('/') +
             "/route?profile=moto" +
             "&point=${start.lat},${start.lon}" +
             "&algorithm=round_trip" +
             "&round_trip.distance=${distanceMeters.toInt()}" +
             "&round_trip.seed=$seed" +
             (headingDeg?.let { "&heading=${it.toInt()}" } ?: "") +
-            "&points_encoded=false"
+            "&points_encoded=false",
+    )
 
+    /** Turn-by-turn route between two points, for in-app navigation. */
+    fun route(config: ServerConfig, from: LatLon, to: LatLon): RouteResult = fetchRoute(
+        config,
+        config.url.trimEnd('/') +
+            "/route?profile=moto" +
+            "&point=${from.lat},${from.lon}" +
+            "&point=${to.lat},${to.lon}" +
+            "&points_encoded=false",
+    )
+
+    private fun fetchRoute(config: ServerConfig, url: String): RouteResult {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 5_000
@@ -145,10 +172,26 @@ object RoutingServer {
             polyline.add(LatLon(c.getDouble(1), c.getDouble(0)))
         }
         if (polyline.size < 2) throw IOException("Routing server returned an empty route")
+        val instructions = ArrayList<NavInstruction>()
+        path.optJSONArray("instructions")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val ins = arr.getJSONObject(i)
+                val interval = ins.getJSONArray("interval")
+                instructions.add(NavInstruction(
+                    text = ins.optString("text"),
+                    distanceMeters = ins.optDouble("distance", 0.0),
+                    sign = ins.optInt("sign"),
+                    startIndex = interval.getInt(0),
+                    endIndex = interval.getInt(1),
+                ))
+            }
+        }
         return RouteResult(
             polyline = polyline,
             waypoints = sampleInterior(polyline, 8),
             distanceMeters = path.optDouble("distance").takeIf { !it.isNaN() },
+            instructions = instructions,
+            timeMs = path.optLong("time").takeIf { it > 0 },
         )
     }
 
