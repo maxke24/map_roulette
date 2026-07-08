@@ -101,6 +101,7 @@ import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.tracking.TripStats
 import com.jellemax.maproulette.tracking.TripTrackingService
+import com.jellemax.maproulette.wear.NavRelay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -376,6 +377,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         navProgress = null
         mapView.mapOrientation = 0f
         mapView.invalidate()
+        NavRelay.clear(context)
     }
 
     fun startNavigation() {
@@ -421,6 +423,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         val pos = LatLon(fix.lat, fix.lon)
         val progress = NavEngine.progress(r, pos) ?: return@LaunchedEffect
         navProgress = progress
+        NavRelay.send(context, progress)
 
         mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), 17.0, 800L)
         if (fix.bearingDeg != null && fix.speedMps > 2.0) {

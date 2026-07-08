@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "MapRoulette"
 include(":app")
+include(":wear")
