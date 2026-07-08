@@ -2,6 +2,7 @@ package com.jellemax.maproulette
 
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,6 +30,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // A map app is glanced at while driving: keep the screen awake while visible.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Settings.init(this)
         // osmdroid requires a distinct user agent for its tile servers.
         Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
