@@ -31,6 +31,7 @@ object PoiRoulette {
         radiusMeters: Double,
         kind: PoiKind,
         bearingDeg: Double?,
+        explored: ExploredArea? = null,
     ): Poi {
         val around = "(around:${radiusMeters.toInt()},${center.lat},${center.lon})"
         val query = """
@@ -64,6 +65,13 @@ object PoiRoulette {
         if (pois.isEmpty()) {
             throw IOException("No ${kind.label.lowercase()} found here — try a larger radius")
         }
-        return pois[Random.nextInt(pois.size)]
+        // Prefer POIs in undiscovered territory; visited ones keep a small chance.
+        val fresh = if (explored == null) pois
+            else pois.filter { !explored.isExplored(it.location) }
+        return if (fresh.isNotEmpty() && Random.nextDouble() >= ExploredArea.EXPLORED_WEIGHT) {
+            fresh[Random.nextInt(fresh.size)]
+        } else {
+            pois[Random.nextInt(pois.size)]
+        }
     }
 }

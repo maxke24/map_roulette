@@ -42,23 +42,28 @@ object RoadRoulette {
         radiusMeters: Double,
         highwayRegex: String,
         bearingDeg: Double? = null,
+        explored: ExploredArea? = null,
     ): LatLon {
         // Small circles are cheap to fetch whole.
         if (radiusMeters <= 1500) {
             return pickPoint(
                 fetchRoads(center, radiusMeters, highwayRegex),
-                center, radiusMeters, bearingDeg,
+                center, radiusMeters, bearingDeg, explored,
             ) ?: throw IOException("No roads found within radius")
         }
 
         var lastError: IOException? = null
         for (attempt in 0 until 4) {
-            val sample = randomPointInCircle(center, radiusMeters, bearingDeg)
+            // Prefer sampling sub-areas the fog of war hasn't uncovered yet.
+            val sample = generateSequence {
+                randomPointInCircle(center, radiusMeters, bearingDeg)
+            }.take(6).firstOrNull { explored?.isExplored(it) != true }
+                ?: randomPointInCircle(center, radiusMeters, bearingDeg)
             // 600 m, 2.4 km, 5.4 km, 9.6 km — widen only if the spot was empty.
             val searchRadius = min(600.0 * (attempt + 1) * (attempt + 1), radiusMeters)
             try {
                 val ways = fetchRoads(sample, searchRadius, highwayRegex)
-                pickPoint(ways, center, radiusMeters, bearingDeg)?.let { return it }
+                pickPoint(ways, center, radiusMeters, bearingDeg, explored)?.let { return it }
             } catch (e: IOException) {
                 lastError = e
             }
@@ -103,14 +108,19 @@ object RoadRoulette {
         return LatLon(center.lat + dLat, center.lon + dLon)
     }
 
-    /** Length-weighted random point on the given ways, restricted to the main circle. */
+    /**
+     * Length-weighted random point on the given ways, restricted to the main
+     * circle. Already-explored segments keep only a fraction of their weight,
+     * so undiscovered roads win most of the time.
+     */
     private fun pickPoint(
         ways: List<OverpassWay>,
         center: LatLon,
         radiusMeters: Double,
         bearingDeg: Double? = null,
+        explored: ExploredArea? = null,
     ): LatLon? {
-        data class Segment(val a: LatLon, val b: LatLon, val length: Double)
+        data class Segment(val a: LatLon, val b: LatLon, val weight: Double)
 
         val segments = ArrayList<Segment>()
         for (way in ways) {
@@ -122,23 +132,26 @@ object RoadRoulette {
                 if (distanceMeters(center, mid) <= radiusMeters &&
                     (bearingDeg == null || withinWedge(center, mid, bearingDeg, 50.0))
                 ) {
-                    segments.add(Segment(a, b, distanceMeters(a, b)))
+                    val factor = if (explored?.isExplored(mid) == true)
+                        ExploredArea.EXPLORED_WEIGHT else 1.0
+                    segments.add(Segment(a, b, distanceMeters(a, b) * factor))
                 }
             }
         }
         if (segments.isEmpty()) return null
 
-        val total = segments.sumOf { it.length }
+        val total = segments.sumOf { it.weight }
+        if (total <= 0.0) return segments.first().a
         var pick = Random.nextDouble(total)
         for (seg in segments) {
-            if (pick <= seg.length) {
-                val t = if (seg.length == 0.0) 0.0 else pick / seg.length
+            if (pick <= seg.weight) {
+                val t = if (seg.weight == 0.0) 0.0 else pick / seg.weight
                 return LatLon(
                     seg.a.lat + (seg.b.lat - seg.a.lat) * t,
                     seg.a.lon + (seg.b.lon - seg.a.lon) * t,
                 )
             }
-            pick -= seg.length
+            pick -= seg.weight
         }
         return segments.last().b
     }

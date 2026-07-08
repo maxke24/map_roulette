@@ -199,23 +199,33 @@ object RoutingServer {
      * Random road destination via the server: pick a random coordinate in the
      * circle and let GraphHopper snap it to the nearest routable road. Retries
      * a few times if the snap lands far outside the circle (water, forests).
+     * With [explored] set, undiscovered spots are strongly preferred; an
+     * explored result is only used when every attempt landed on known roads.
      */
     fun randomRoadDestination(
         config: ServerConfig,
         center: LatLon,
         radiusMeters: Double,
         bearingDeg: Double? = null,
+        explored: ExploredArea? = null,
     ): LatLon {
         var best: LatLon? = null
-        repeat(3) {
-            val target = RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
+        var exploredHit: LatLon? = null
+        repeat(4) {
+            val target = generateSequence {
+                RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
+            }.take(6).firstOrNull { explored?.isExplored(it) != true }
+                ?: RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
             val snapped = snapToRoad(config, center, target) ?: return@repeat
             if (RoadRoulette.distanceMeters(center, snapped) <= radiusMeters * 1.15) {
-                return snapped
+                if (explored?.isExplored(snapped) != true) return snapped
+                if (exploredHit == null) exploredHit = snapped
+            } else {
+                best = snapped
             }
-            best = snapped
         }
-        return best ?: throw IOException("Routing server could not find a road")
+        return exploredHit ?: best
+            ?: throw IOException("Routing server could not find a road")
     }
 
     private fun snapToRoad(config: ServerConfig, from: LatLon, to: LatLon): LatLon? {

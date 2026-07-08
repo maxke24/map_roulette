@@ -77,6 +77,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.R
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.jellemax.maproulette.data.ExploredArea
 import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.NavEngine
 import com.jellemax.maproulette.data.PoiKind
@@ -445,6 +446,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             error = null
             var serverError: String? = null
             try {
+                // Bias destinations toward territory the fog hasn't uncovered.
+                val explored = withContext(Dispatchers.IO) { ExploredArea.load(context) }
                 if (mode.roundTrip) {
                     // Prefer the self-hosted routing server (single fast request,
                     // real road-following loop); fall back to Overpass sampling.
@@ -492,7 +495,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                         val poi = withTimeout(30_000) {
                             withContext(Dispatchers.IO) {
                                 PoiRoulette.randomPoi(
-                                    loc, radiusKm * 1000.0, poiKind, bearing)
+                                    loc, radiusKm * 1000.0, poiKind, bearing, explored)
                             }
                         }
                         destination = poi.location
@@ -508,7 +511,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                                 if (mode == TravelMode.CAR && serverConfig.usable) {
                                     d = try {
                                         RoutingServer.randomRoadDestination(
-                                            serverConfig, loc, radiusKm * 1000.0, bearing)
+                                            serverConfig, loc, radiusKm * 1000.0,
+                                            bearing, explored)
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {
@@ -517,7 +521,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                                     }
                                 }
                                 d ?: RoadRoulette.randomRoadPoint(
-                                    loc, radiusKm * 1000.0, mode.highwayRegex, bearing)
+                                    loc, radiusKm * 1000.0, mode.highwayRegex,
+                                    bearing, explored)
                             }
                         }
                         destination = dest
