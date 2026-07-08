@@ -1,6 +1,8 @@
 package com.jellemax.maproulette.data
 
 import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
 import java.io.File
 
@@ -12,12 +14,17 @@ object TraceStore {
 
     private const val FILE_NAME = "traces.jsonl"
 
+    /** Bumped on every write so the map reloads traces immediately. */
+    private val _version = MutableStateFlow(0)
+    val version: StateFlow<Int> = _version
+
     fun append(context: Context, trace: List<LatLon>) {
         if (trace.size < 2) return
         val line = JSONArray().apply {
             for (p in trace) put(JSONArray().put(p.lat).put(p.lon))
         }
         file(context).appendText(line.toString() + "\n")
+        _version.value++
     }
 
     fun loadAll(context: Context): List<List<LatLon>> {
@@ -38,6 +45,7 @@ object TraceStore {
 
     fun clear(context: Context) {
         file(context).delete()
+        _version.value++
     }
 
     /** Raw JSONL lines, for server sync. */
@@ -50,6 +58,7 @@ object TraceStore {
     fun replaceLines(context: Context, lines: List<String>) {
         file(context).writeText(
             lines.filter { it.isNotBlank() }.joinToString("\n", postfix = "\n"))
+        _version.value++
     }
 
     private fun file(context: Context) = File(context.filesDir, FILE_NAME)

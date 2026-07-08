@@ -137,27 +137,34 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     var directionDeg by rememberSaveable { mutableStateOf<Float?>(null) }
     var destinationName by remember { mutableStateOf<String?>(null) }
     var fogEnabled by rememberSaveable { mutableStateOf(false) }
-    var tracesVersion by remember { mutableStateOf(0) }
-    val traces = remember(tracesVersion) {
+    // Stored traces reload on every store write; the live trace and fix come
+    // straight from the tracking service, so fog and position update in real
+    // time instead of only when a trip is saved.
+    val storeVersion by TraceStore.version.collectAsStateWithLifecycle()
+    val traces = remember(storeVersion) {
         TraceStore.loadAll(context).map { trace -> trace.map { GeoPoint(it.lat, it.lon) } }
     }
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
-    // Reload explored traces when a trip ends.
-    LaunchedEffect(stats == null) { if (stats == null) tracesVersion++ }
+    val liveFix by TripTrackingService.lastFix.collectAsStateWithLifecycle()
+    val liveTrace by TripTrackingService.liveTrace.collectAsStateWithLifecycle()
+
+    LaunchedEffect(liveFix) {
+        liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
+            myLocation = LatLon(it.lat, it.lon)
+        }
+    }
 
     // Pull from the sync server on launch: restores everything after a
     // reinstall and picks up trips recorded while the app was closed.
     LaunchedEffect(Unit) {
         if (SyncClient.configured) {
-            val synced = withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 try {
                     SyncClient.sync(context)
-                    true
                 } catch (e: Exception) {
-                    false // offline or server down; next launch catches up
+                    // offline or server down; next launch catches up
                 }
             }
-            if (synced) tracesVersion++
         }
     }
 
@@ -267,11 +274,13 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
 
     // Redraw overlays whenever location, radius, destination, or route changes.
     LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
-        fogEnabled, fogRadius, traces) {
+        fogEnabled, fogRadius, traces, liveTrace) {
         mapView.overlays.clear()
         if (fogEnabled) {
+            val live = liveTrace.map { GeoPoint(it.lat, it.lon) }
+            val all = if (live.size >= 2) traces + listOf(live) else traces
             mapView.overlays.add(FogOverlay(
-                tracesProvider = { traces },
+                tracesProvider = { all },
                 currentLocationProvider = {
                     myLocation?.let { GeoPoint(it.lat, it.lon) }
                 },

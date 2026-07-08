@@ -45,6 +45,16 @@ data class TripStats(
     val topSpeedMps: Double = 0.0,
 )
 
+/** Latest GPS fix, published live for the map (fog, navigation). */
+data class Fix(
+    val lat: Double,
+    val lon: Double,
+    val speedMps: Double,
+    val bearingDeg: Float?,
+    val accuracyMeters: Float,
+    val timeMs: Long,
+)
+
 /**
  * Always-on foreground service with two modes:
  *
@@ -80,6 +90,13 @@ class TripTrackingService : Service() {
 
         private val _stats = MutableStateFlow<TripStats?>(null)
         val stats: StateFlow<TripStats?> = _stats
+
+        private val _lastFix = MutableStateFlow<Fix?>(null)
+        val lastFix: StateFlow<Fix?> = _lastFix
+
+        /** Trace points not yet flushed to [TraceStore]; live fog-of-war. */
+        private val _liveTrace = MutableStateFlow<List<LatLon>>(emptyList())
+        val liveTrace: StateFlow<List<LatLon>> = _liveTrace
 
         /** Start (or keep) the always-on tracker in idle mode. */
         fun startMonitoring(context: Context) {
@@ -282,6 +299,14 @@ class TripTrackingService : Service() {
 
     private fun onLocation(location: Location) {
         val speed = speedOf(location)
+        _lastFix.value = Fix(
+            lat = location.latitude,
+            lon = location.longitude,
+            speedMps = speed,
+            bearingDeg = if (location.hasBearing()) location.bearing else null,
+            accuracyMeters = location.accuracy,
+            timeMs = location.time,
+        )
         val stats = _stats.value
         if (stats == null) {
             onIdleLocation(location, speed)
@@ -382,6 +407,7 @@ class TripTrackingService : Service() {
         }
         tracePoints.add(p)
         if (tracePoints.size >= 200) flushTrace(keepLast = true)
+        _liveTrace.value = tracePoints.toList()
     }
 
     private fun flushTrace(keepLast: Boolean = false) {
@@ -389,6 +415,7 @@ class TripTrackingService : Service() {
         val last = tracePoints.lastOrNull()
         tracePoints.clear()
         if (keepLast && last != null) tracePoints.add(last)
+        _liveTrace.value = tracePoints.toList()
     }
 
     override fun onDestroy() {
