@@ -15,8 +15,8 @@ android {
         applicationId = "com.jellemax.maproulette"
         minSdk = 30
         targetSdk = 35
-        versionCode = 19
-        versionName = "1.12"
+        versionCode = 20
+        versionName = "1.13"
     }
 
     buildTypes {
