@@ -28,6 +28,10 @@ object Settings {
     private val _fogRadiusMeters = MutableStateFlow(FOG_RADIUS_DEFAULT)
     val fogRadiusMeters: StateFlow<Float> = _fogRadiusMeters
 
+    /** In-app navigation avoids motorways/trunks (matters for car mode). */
+    private val _avoidHighways = MutableStateFlow(false)
+    val avoidHighways: StateFlow<Boolean> = _avoidHighways
+
     /** User-entered sync server URL; blank = use the baked-in default. */
     private val _syncUrl = MutableStateFlow("")
     val syncUrl: StateFlow<String> = _syncUrl
@@ -40,6 +44,7 @@ object Settings {
             Theme.valueOf(prefs.getString("theme", Theme.AUTO.name)!!)
         }.getOrDefault(Theme.AUTO)
         _autoDetectDrives.value = prefs.getBoolean("auto_detect_drives", true)
+        _avoidHighways.value = prefs.getBoolean("avoid_highways", false)
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
     }
@@ -52,6 +57,11 @@ object Settings {
     fun setAutoDetectDrives(value: Boolean) {
         _autoDetectDrives.value = value
         prefs.edit().putBoolean("auto_detect_drives", value).apply()
+    }
+
+    fun setAvoidHighways(value: Boolean) {
+        _avoidHighways.value = value
+        prefs.edit().putBoolean("avoid_highways", value).apply()
     }
 
     fun setFogRadiusMeters(value: Float) {

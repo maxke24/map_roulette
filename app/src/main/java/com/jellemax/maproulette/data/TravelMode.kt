@@ -1,8 +1,9 @@
 package com.jellemax.maproulette.data
 
 /**
- * Travel modes with their own radius range and the OSM highway classes that
- * make sense as a destination for that mode.
+ * Travel modes with their own radius range, the OSM highway classes that
+ * make sense as a destination for that mode, and the GraphHopper profile
+ * used for routing on the own server.
  */
 enum class TravelMode(
     val label: String,
@@ -12,22 +13,18 @@ enum class TravelMode(
     val highwayRegex: String,
     /** Google Maps navigation mode: w=walk, b=bike, d=drive. */
     val gmapsMode: String,
+    /** Profile name on the self-hosted GraphHopper server. */
+    val ghProfile: String,
     /** Spin produces a loop of waypoints instead of a single destination. */
     val roundTrip: Boolean = false,
 ) {
-    WALK(
-        label = "Walk",
-        minKm = 0.5f, maxKm = 8f, defaultKm = 2f,
-        highwayRegex = "^(footway|path|pedestrian|living_street|residential|" +
-            "unclassified|tertiary|track|cycleway)$",
-        gmapsMode = "w",
-    ),
     BIKE(
         label = "Bike",
         minKm = 1f, maxKm = 30f, defaultKm = 10f,
         highwayRegex = "^(cycleway|living_street|residential|unclassified|" +
             "tertiary|secondary|track|path)$",
         gmapsMode = "b",
+        ghProfile = "bike",
     ),
     MOTO(
         // For round trips the slider means total trip length, not radius.
@@ -36,6 +33,7 @@ enum class TravelMode(
         // Curvy riding roads live on the rural network; skip motorways/residential.
         highwayRegex = "^(primary|secondary|tertiary|unclassified)$",
         gmapsMode = "d",
+        ghProfile = "moto",
         roundTrip = true,
     ),
     CAR(
@@ -44,5 +42,6 @@ enum class TravelMode(
         highwayRegex = "^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|" +
             "motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$",
         gmapsMode = "d",
+        ghProfile = "car",
     ),
 }

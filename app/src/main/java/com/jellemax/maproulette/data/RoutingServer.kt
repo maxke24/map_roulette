@@ -2,6 +2,7 @@ package com.jellemax.maproulette.data
 
 import android.content.Context
 import com.jellemax.maproulette.BuildConfig
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -128,17 +129,48 @@ object RoutingServer {
             "&points_encoded=false",
     )
 
-    /** Turn-by-turn route between two points, for in-app navigation. */
-    fun route(config: ServerConfig, from: LatLon, to: LatLon): RouteResult = fetchRoute(
-        config,
-        config.url.trimEnd('/') +
-            "/route?profile=moto" +
-            "&point=${from.lat},${from.lon}" +
-            "&point=${to.lat},${to.lon}" +
-            "&points_encoded=false",
-    )
+    /**
+     * Turn-by-turn route between two points, for in-app navigation.
+     * [avoidHighways] downgrades motorways/trunks via a query custom model —
+     * only matters for the car profile; moto and bike never use them anyway.
+     */
+    fun route(
+        config: ServerConfig,
+        from: LatLon,
+        to: LatLon,
+        profile: String,
+        avoidHighways: Boolean = false,
+    ): RouteResult {
+        if (!avoidHighways) {
+            return fetchRoute(
+                config,
+                config.url.trimEnd('/') +
+                    "/route?profile=$profile" +
+                    "&point=${from.lat},${from.lon}" +
+                    "&point=${to.lat},${to.lon}" +
+                    "&points_encoded=false",
+            )
+        }
+        // Custom models require a POST request (and flexible routing).
+        val body = JSONObject()
+            .put("profile", profile)
+            .put("points", JSONArray()
+                .put(JSONArray().put(from.lon).put(from.lat))
+                .put(JSONArray().put(to.lon).put(to.lat)))
+            .put("points_encoded", false)
+            .put("ch.disable", true)
+            .put("custom_model", JSONObject().put("priority", JSONArray().put(
+                JSONObject()
+                    .put("if", "road_class == MOTORWAY || road_class == TRUNK")
+                    .put("multiply_by", 0.05))))
+        return fetchRoute(config, config.url.trimEnd('/') + "/route", body.toString())
+    }
 
-    private fun fetchRoute(config: ServerConfig, url: String): RouteResult {
+    private fun fetchRoute(
+        config: ServerConfig,
+        url: String,
+        postBody: String? = null,
+    ): RouteResult {
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 5_000
@@ -148,6 +180,12 @@ object RoutingServer {
             if (config.clientId.isNotBlank()) {
                 conn.setRequestProperty("CF-Access-Client-Id", config.clientId)
                 conn.setRequestProperty("CF-Access-Client-Secret", config.clientSecret)
+            }
+            if (postBody != null) {
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.use { it.write(postBody.toByteArray()) }
             }
             if (conn.responseCode != 200) {
                 throw IOException("Routing server error: HTTP ${conn.responseCode}")
@@ -208,6 +246,7 @@ object RoutingServer {
         radiusMeters: Double,
         bearingDeg: Double? = null,
         explored: ExploredArea? = null,
+        profile: String = "moto",
     ): LatLon {
         var best: LatLon? = null
         var exploredHit: LatLon? = null
@@ -216,7 +255,7 @@ object RoutingServer {
                 RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
             }.take(6).firstOrNull { explored?.isExplored(it) != true }
                 ?: RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
-            val snapped = snapToRoad(config, center, target) ?: return@repeat
+            val snapped = snapToRoad(config, center, target, profile) ?: return@repeat
             if (RoadRoulette.distanceMeters(center, snapped) <= radiusMeters * 1.15) {
                 if (explored?.isExplored(snapped) != true) return snapped
                 if (exploredHit == null) exploredHit = snapped
@@ -228,9 +267,14 @@ object RoutingServer {
             ?: throw IOException("Routing server could not find a road")
     }
 
-    private fun snapToRoad(config: ServerConfig, from: LatLon, to: LatLon): LatLon? {
+    private fun snapToRoad(
+        config: ServerConfig,
+        from: LatLon,
+        to: LatLon,
+        profile: String,
+    ): LatLon? {
         val url = config.url.trimEnd('/') +
-            "/route?profile=moto" +
+            "/route?profile=$profile" +
             "&point=${from.lat},${from.lon}" +
             "&point=${to.lat},${to.lon}" +
             "&points_encoded=false"

@@ -28,7 +28,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
-import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Explore
@@ -127,7 +126,6 @@ private val DIRECTION_NAMES = listOf("North", "North-east", "East", "South-east"
 
 private val TravelMode.icon: ImageVector
     get() = when (this) {
-        TravelMode.WALK -> Icons.AutoMirrored.Filled.DirectionsWalk
         TravelMode.BIKE -> Icons.AutoMirrored.Filled.DirectionsBike
         TravelMode.MOTO -> Icons.Default.TwoWheeler
         TravelMode.CAR -> Icons.Default.DirectionsCar
@@ -403,7 +401,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         scope.launch {
             try {
                 route = withContext(Dispatchers.IO) {
-                    RoutingServer.route(serverConfig, loc, dest)
+                    RoutingServer.route(serverConfig, loc, dest, mode.ghProfile,
+                        Settings.avoidHighways.value)
                 }
                 navigating = true
             } catch (e: Exception) {
@@ -450,7 +449,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             scope.launch {
                 try {
                     route = withContext(Dispatchers.IO) {
-                        RoutingServer.route(serverConfig, pos, dest)
+                        RoutingServer.route(serverConfig, pos, dest, mode.ghProfile,
+                            Settings.avoidHighways.value)
                     }
                 } catch (e: Exception) {
                     // stay on the old line; retried after the cooldown
@@ -530,15 +530,14 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     } else {
                         val dest = withTimeout(30_000) {
                             withContext(Dispatchers.IO) {
-                                // Car can use the own server (snap random point to road,
-                                // reachability guaranteed); walk/bike need path/footway
-                                // data the server doesn't import, so Overpass only.
+                                // Own server snaps a random point to a road reachable
+                                // in this mode's profile; Overpass fallback below.
                                 var d: LatLon? = null
-                                if (mode == TravelMode.CAR && serverConfig.usable) {
+                                if (serverConfig.usable) {
                                     d = try {
                                         RoutingServer.randomRoadDestination(
                                             serverConfig, loc, radiusKm * 1000.0,
-                                            bearing, explored)
+                                            bearing, explored, mode.ghProfile)
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {

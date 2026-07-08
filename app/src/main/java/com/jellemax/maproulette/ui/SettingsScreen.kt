@@ -54,6 +54,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val theme by Settings.theme.collectAsStateWithLifecycle()
     val autoDetect by Settings.autoDetectDrives.collectAsStateWithLifecycle()
+    val avoidHighways by Settings.avoidHighways.collectAsStateWithLifecycle()
     val fogRadius by Settings.fogRadiusMeters.collectAsStateWithLifecycle()
     var confirmReset by remember { mutableStateOf(false) }
 
@@ -117,6 +118,27 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Switch(
                         checked = autoDetect,
                         onCheckedChange = { Settings.setAutoDetectDrives(it) },
+                    )
+                }
+            }
+
+            SettingsSection("Navigation") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Avoid highways", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "In-app navigation skips motorways (car mode; " +
+                                "moto and bike never use them)",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = avoidHighways,
+                        onCheckedChange = { Settings.setAvoidHighways(it) },
                     )
                 }
             }
