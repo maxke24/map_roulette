@@ -19,7 +19,7 @@ object Settings {
 
     private lateinit var prefs: SharedPreferences
 
-    private val _theme = MutableStateFlow(Theme.SYSTEM)
+    private val _theme = MutableStateFlow(Theme.AUTO)
     val theme: StateFlow<Theme> = _theme
 
     private val _autoDetectDrives = MutableStateFlow(true)
@@ -37,8 +37,8 @@ object Settings {
         prefs = context.applicationContext
             .getSharedPreferences("settings", Context.MODE_PRIVATE)
         _theme.value = runCatching {
-            Theme.valueOf(prefs.getString("theme", Theme.SYSTEM.name)!!)
-        }.getOrDefault(Theme.SYSTEM)
+            Theme.valueOf(prefs.getString("theme", Theme.AUTO.name)!!)
+        }.getOrDefault(Theme.AUTO)
         _autoDetectDrives.value = prefs.getBoolean("auto_detect_drives", true)
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
