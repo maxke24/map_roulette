@@ -12,10 +12,16 @@ data class GeocodeResult(val name: String, val location: LatLon)
 /** Address/place search via OSM Nominatim, biased toward the user's area. */
 object Geocoder {
 
-    fun search(query: String, near: LatLon?, limit: Int = 6): List<GeocodeResult> {
+    /**
+     * @param bounded Hard-restrict results to the viewbox around [near] instead of just
+     * preferring it. Without this, a plain viewbox is only a soft ranking hint, so short
+     * live-typed queries (e.g. "kru") can surface same-named places on the other side of the
+     * world (Kraków) ahead of the nearby match.
+     */
+    fun search(query: String, near: LatLon?, limit: Int = 6, bounded: Boolean = false): List<GeocodeResult> {
         val viewbox = near?.let {
-            // Preference box (~75 km) around the user; not a hard bound.
-            "&viewbox=${it.lon - 0.7},${it.lat + 0.7},${it.lon + 0.7},${it.lat - 0.7}"
+            "&viewbox=${it.lon - 0.7},${it.lat + 0.7},${it.lon + 0.7},${it.lat - 0.7}" +
+                if (bounded) "&bounded=1" else ""
         } ?: ""
         val url = "https://nominatim.openstreetmap.org/search?format=jsonv2" +
             "&q=" + URLEncoder.encode(query, "UTF-8") +

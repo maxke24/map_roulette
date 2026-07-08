@@ -91,6 +91,7 @@ import com.jellemax.maproulette.data.LatLon
 import com.jellemax.maproulette.data.NavEngine
 import com.jellemax.maproulette.data.PoiKind
 import com.jellemax.maproulette.data.PoiRoulette
+import com.jellemax.maproulette.data.RecentSearchStore
 import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.RouteResult
@@ -816,11 +817,18 @@ private fun SearchDialog(
     onPick: (GeocodeResult) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<GeocodeResult>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val recents = remember { RecentSearchStore.load(context) }
+
+    fun pick(r: GeocodeResult) {
+        RecentSearchStore.save(context, r)
+        onPick(r)
+    }
 
     fun run() {
         if (query.isBlank() || searching) return
@@ -828,6 +836,7 @@ private fun SearchDialog(
         error = null
         scope.launch {
             try {
+                // Explicit search: unbounded, so the user can still reach places far from home.
                 results = withContext(Dispatchers.IO) { Geocoder.search(query, near) }
                 if (results.isEmpty()) error = "No results"
             } catch (e: Exception) {
@@ -838,17 +847,28 @@ private fun SearchDialog(
     }
 
     // Live suggestions as the user types, debounced so we don't hammer Nominatim per keystroke.
+    // Recent picks that match are surfaced first; the network lookup is bounded to nearby places
+    // so a short query like "kru" doesn't suggest a same-named place on the other side of the world.
     LaunchedEffect(query) {
-        if (query.length < 3) {
-            results = emptyList()
+        if (query.isBlank()) {
+            results = recents
             error = null
             return@LaunchedEffect
         }
+        val recentMatches = recents.filter { it.name.contains(query, ignoreCase = true) }
+        if (query.length < 3) {
+            results = recentMatches
+            error = null
+            return@LaunchedEffect
+        }
+        results = recentMatches
         delay(400)
         searching = true
         error = null
         try {
-            results = withContext(Dispatchers.IO) { Geocoder.search(query, near) }
+            val nearby = withContext(Dispatchers.IO) { Geocoder.search(query, near, bounded = near != null) }
+            val fresh = nearby.filter { hit -> recentMatches.none { it.name == hit.name } }
+            results = recentMatches + fresh
             if (results.isEmpty()) error = "No results"
         } catch (e: Exception) {
             error = e.message ?: "Search failed"
@@ -883,7 +903,7 @@ private fun SearchDialog(
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onPick(r) }
+                            .clickable { pick(r) }
                             .padding(vertical = 10.dp),
                     )
                 }
