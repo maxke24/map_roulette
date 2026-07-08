@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint as AndroidPaint
+import java.io.IOException
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationSearching
@@ -53,6 +56,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -99,6 +103,7 @@ import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.RouteResult
 import com.jellemax.maproulette.data.RoutingServer
+import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
@@ -110,6 +115,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -136,6 +144,62 @@ private val TravelMode.icon: ImageVector
         TravelMode.CAR -> Icons.Default.DirectionsCar
     }
 
+/** One spin result awaiting a pick; [route] is null when the routing server
+ *  couldn't be reached — the card then shows straight-line distance only. */
+private data class RouteCandidate(
+    val destination: LatLon,
+    val name: String?,
+    val route: RouteResult?,
+    val straightLineMeters: Double,
+)
+
+/** Picks one destination candidate and eagerly routes to it, so the card list
+ *  can show real road distance/ETA instead of a straight line. */
+private suspend fun pickCandidate(
+    config: ServerConfig,
+    loc: LatLon,
+    radiusMeters: Double,
+    minRadiusMeters: Double,
+    mode: TravelMode,
+    poiKind: PoiKind,
+    bearing: Double?,
+    explored: ExploredArea,
+): RouteCandidate {
+    val (dest, name) = if (poiKind != PoiKind.ROAD) {
+        val poi = PoiRoulette.randomPoi(loc, radiusMeters, poiKind, bearing, explored, minRadiusMeters)
+        poi.location to poi.name
+    } else {
+        // Own server snaps a random point to a road reachable in this mode's
+        // profile; Overpass fallback below.
+        val server = if (config.usable) {
+            try {
+                RoutingServer.randomRoadDestination(
+                    config, loc, radiusMeters, bearing, explored, mode.ghProfile, minRadiusMeters)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+        val d = server ?: RoadRoulette.randomRoadPoint(
+            loc, radiusMeters, mode.highwayRegex, bearing, explored, minRadiusMeters)
+        d to null
+    }
+    val route = try {
+        RoutingServer.route(config, loc, dest, mode.ghProfile, Settings.avoidHighways.value)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+    return RouteCandidate(
+        destination = dest,
+        name = name,
+        route = route,
+        straightLineMeters = RoadRoulette.distanceMeters(loc, dest),
+    )
+}
+
 @Composable
 fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     val context = LocalContext.current
@@ -143,6 +207,8 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
 
     var mode by rememberSaveable { mutableStateOf(TravelMode.CAR) }
     var radiusKm by rememberSaveable { mutableFloatStateOf(TravelMode.CAR.defaultKm) }
+    var minRadiusKm by rememberSaveable { mutableFloatStateOf(0f) }
+    var candidates by remember { mutableStateOf<List<RouteCandidate>>(emptyList()) }
     var myLocation by remember { mutableStateOf<LatLon?>(null) }
     var destination by remember { mutableStateOf<LatLon?>(null) }
     var route by remember { mutableStateOf<RouteResult?>(null) }
@@ -172,11 +238,20 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     var lastRerouteMs by remember { mutableLongStateOf(0L) }
     var lastCenteredPos by remember { mutableStateOf<LatLon?>(null) }
     var followMe by remember { mutableStateOf(false) }
+    var settingsCollapsed by rememberSaveable { mutableStateOf(false) }
+    var ambientSpeedLimitKmh by remember { mutableStateOf<Double?>(null) }
+    var lastSpeedLimitQueryPos by remember { mutableStateOf<LatLon?>(null) }
+    var lastSpeedLimitQueryMs by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(liveFix) {
         liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
             myLocation = LatLon(it.lat, it.lon)
         }
+    }
+
+    // Keep the min-distance floor from exceeding the radius as the slider moves.
+    LaunchedEffect(radiusKm) {
+        if (minRadiusKm > radiusKm) minRadiusKm = radiusKm
     }
 
     // Pull from the sync server on launch: restores everything after a
@@ -430,6 +505,23 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         }
     }
 
+    // Ambient speed-limit badge while just driving (not navigating): throttled
+    // so we don't hammer Overpass every GPS fix — requery only after moving
+    // ~150m or 20s, matching NavEngine's own speedLimitKmh via GraphHopper.
+    LaunchedEffect(liveFix, navigating) {
+        if (navigating) return@LaunchedEffect
+        val fix = liveFix ?: return@LaunchedEffect
+        if (fix.speedMps < 2.0) return@LaunchedEffect
+        val pos = LatLon(fix.lat, fix.lon)
+        val moved = lastSpeedLimitQueryPos?.let { RoadRoulette.distanceMeters(it, pos) }
+            ?: Double.MAX_VALUE
+        val now = System.currentTimeMillis()
+        if (moved < 150.0 && now - lastSpeedLimitQueryMs < 20_000) return@LaunchedEffect
+        lastSpeedLimitQueryPos = pos
+        lastSpeedLimitQueryMs = now
+        ambientSpeedLimitKmh = withContext(Dispatchers.IO) { RoadRoulette.nearestSpeedLimitKmh(pos) }
+    }
+
     // Recenter on the rider while driving with no destination set — same jitter
     // guard as turn-by-turn, but no route progress/reroute logic.
     LaunchedEffect(followMe, navigating, liveFix) {
@@ -560,47 +652,29 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     )
                 } else {
                     val bearing = directionDeg?.toDouble()
-                    if (poiKind != PoiKind.ROAD) {
-                        val poi = withTimeout(30_000) {
-                            withContext(Dispatchers.IO) {
-                                PoiRoulette.randomPoi(
-                                    loc, radiusKm * 1000.0, poiKind, bearing, explored)
-                            }
-                        }
-                        destination = poi.location
-                        destinationName = poi.name
-                        route = null
-                    } else {
-                        val dest = withTimeout(30_000) {
-                            withContext(Dispatchers.IO) {
-                                // Own server snaps a random point to a road reachable
-                                // in this mode's profile; Overpass fallback below.
-                                var d: LatLon? = null
-                                if (serverConfig.usable) {
-                                    d = try {
-                                        RoutingServer.randomRoadDestination(
-                                            serverConfig, loc, radiusKm * 1000.0,
-                                            bearing, explored, mode.ghProfile)
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        serverError = e.message
-                                        null
+                    val minMeters = minRadiusKm.toDouble() * 1000.0
+                    val picks = withTimeout(30_000) {
+                        coroutineScope {
+                            (1..3).map {
+                                async(Dispatchers.IO) {
+                                    runCatching {
+                                        pickCandidate(
+                                            serverConfig, loc, radiusKm.toDouble() * 1000.0,
+                                            minMeters, mode, poiKind, bearing, explored)
                                     }
                                 }
-                                d ?: RoadRoulette.randomRoadPoint(
-                                    loc, radiusKm * 1000.0, mode.highwayRegex,
-                                    bearing, explored)
-                            }
+                            }.awaitAll()
                         }
-                        destination = dest
-                        destinationName = null
-                        route = null
                     }
-                    val dest = destination!!
+                    val results = picks.mapNotNull { it.getOrNull() }
+                    if (results.isEmpty()) {
+                        throw picks.firstNotNullOfOrNull { it.exceptionOrNull() }
+                            ?: IOException("Failed to find a destination")
+                    }
+                    candidates = results
                     mapView.zoomToBoundingBox(
                         BoundingBox.fromGeoPoints(
-                            listOf(GeoPoint(loc.lat, loc.lon), GeoPoint(dest.lat, dest.lon))
+                            (results.map { it.destination } + loc).map { GeoPoint(it.lat, it.lon) }
                         ).increaseByScale(1.4f),
                         true,
                     )
@@ -638,6 +712,16 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     .padding(12.dp),
             )
         } else {
+            liveFix?.takeIf { it.speedMps >= 2.0 }?.let { fix ->
+                AmbientSpeedBadge(
+                    speedKmh = fix.speedMps * 3.6,
+                    limitKmh = ambientSpeedLimitKmh,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .padding(16.dp),
+                )
+            }
             Column(
                 Modifier
                     .align(Alignment.TopEnd)
@@ -684,6 +768,30 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                 progress = navProgress,
                 offRoute = (navProgress?.offRouteMeters ?: 0.0) > 60,
                 onExit = { stopNavigation() },
+            ) else if (candidates.isNotEmpty()) CandidatesCard(
+                candidates = candidates,
+                onPick = { c ->
+                    destination = c.destination
+                    destinationName = c.name
+                    route = c.route
+                    candidates = emptyList()
+                    val loc = myLocation
+                    if (loc != null) {
+                        mapView.zoomToBoundingBox(
+                            BoundingBox.fromGeoPoints(
+                                listOf(GeoPoint(loc.lat, loc.lon),
+                                    GeoPoint(c.destination.lat, c.destination.lon))
+                            ).increaseByScale(1.4f),
+                            true,
+                        )
+                    }
+                },
+                onReroll = { candidates = emptyList(); spin() },
+                onCancel = { candidates = emptyList() },
+            ) else if (settingsCollapsed) CollapsedSettingsBar(
+                mode = mode,
+                radiusKm = radiusKm,
+                onExpand = { settingsCollapsed = false },
             ) else Card(
                 shape = MaterialTheme.shapes.extraLarge,
                 colors = CardDefaults.cardColors(
@@ -691,6 +799,17 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                 ),
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        IconButton(
+                            onClick = { settingsCollapsed = true },
+                            modifier = Modifier.size(28.dp),
+                        ) {
+                            Icon(Icons.Default.ExpandMore, contentDescription = "Minimize")
+                        }
+                    }
                     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                         TravelMode.entries.forEachIndexed { index, m ->
                             SegmentedButton(
@@ -698,9 +817,11 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                                 onClick = {
                                     mode = m
                                     radiusKm = m.defaultKm
+                                    minRadiusKm = 0f
                                     destination = null
                                     destinationName = null
                                     route = null
+                                    candidates = emptyList()
                                 },
                                 shape = SegmentedButtonDefaults.itemShape(
                                     index = index, count = TravelMode.entries.size,
@@ -748,6 +869,27 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                         onValueChange = { radiusKm = it },
                         valueRange = mode.minKm..mode.maxKm,
                     )
+
+                    if (!mode.roundTrip) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text("Min distance", style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                if (minRadiusKm <= 0f) "Off"
+                                else if (mode.maxKm <= 10f) "%.1f km".format(minRadiusKm)
+                                else "${minRadiusKm.toInt()} km",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        Slider(
+                            value = minRadiusKm,
+                            onValueChange = { minRadiusKm = it },
+                            valueRange = 0f..radiusKm,
+                        )
+                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (!mode.roundTrip) {
@@ -990,6 +1132,134 @@ private fun SelectorChip(
                     },
                 )
             }
+        }
+    }
+}
+
+/** Spin results awaiting a pick: distance/ETA per candidate, tap one to commit to it. */
+@Composable
+private fun CandidatesCard(
+    candidates: List<RouteCandidate>,
+    onPick: (RouteCandidate) -> Unit,
+    onReroll: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Pick a destination", style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold)
+            candidates.forEachIndexed { index, c ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(c) }
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text(
+                            c.name ?: "Option ${index + 1}",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        val distanceMeters = c.route?.distanceMeters ?: c.straightLineMeters
+                        val distanceLabel = (if (c.route?.distanceMeters == null) "~" else "") +
+                            formatDistanceKm(distanceMeters)
+                        val etaLabel = c.route?.timeMs?.let { " · %.0f min".format(it / 60_000.0) } ?: ""
+                        Text(
+                            distanceLabel + etaLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.Default.Navigation, contentDescription = "Choose this destination")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) {
+                    Text("Cancel")
+                }
+                Button(onClick = onReroll, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Casino, contentDescription = null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Reroll")
+                }
+            }
+        }
+    }
+}
+
+/** Slim stand-in for the settings card while just cruising — tap to expand. */
+@Composable
+private fun CollapsedSettingsBar(
+    mode: TravelMode,
+    radiusKm: Float,
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onExpand() },
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(mode.icon, contentDescription = null)
+                Text(
+                    "${mode.label} · ${if (mode.maxKm <= 10f) "%.1f".format(radiusKm) else radiusKm.toInt()} km",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+            Icon(Icons.Default.ExpandLess, contentDescription = "Expand")
+        }
+    }
+}
+
+/** Current-speed readout with a color cue against the nearest road's posted
+ *  limit, shown while driving without an active route (mirrors the watch's
+ *  color-cue treatment instead of duplicating the nav banner's full sign). */
+@Composable
+private fun AmbientSpeedBadge(speedKmh: Double, limitKmh: Double?, modifier: Modifier = Modifier) {
+    val speeding = limitKmh?.let { speedKmh > it + 5 } ?: false
+    Card(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SpeedLimitSign(limitKmh)
+            Text(
+                "%.0f".format(speedKmh),
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = if (speeding) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurface,
+            )
         }
     }
 }

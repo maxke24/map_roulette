@@ -265,16 +265,19 @@ object RoutingServer {
         bearingDeg: Double? = null,
         explored: ExploredArea? = null,
         profile: String = "moto",
+        minRadiusMeters: Double = 0.0,
     ): LatLon {
         var best: LatLon? = null
         var exploredHit: LatLon? = null
         repeat(4) {
             val target = generateSequence {
-                RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
+                RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg, minRadiusMeters)
             }.take(6).firstOrNull { explored?.isExplored(it) != true }
-                ?: RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg)
+                ?: RoadRoulette.randomPointInCircle(center, radiusMeters, bearingDeg, minRadiusMeters)
             val snapped = snapToRoad(config, center, target, profile) ?: return@repeat
-            if (RoadRoulette.distanceMeters(center, snapped) <= radiusMeters * 1.15) {
+            val dist = RoadRoulette.distanceMeters(center, snapped)
+            if (dist < minRadiusMeters) return@repeat // too close, discard entirely
+            if (dist <= radiusMeters * 1.15) {
                 if (explored?.isExplored(snapped) != true) return snapped
                 if (exploredHit == null) exploredHit = snapped
             } else {

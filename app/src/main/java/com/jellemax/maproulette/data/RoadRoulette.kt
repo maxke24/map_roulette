@@ -43,12 +43,13 @@ object RoadRoulette {
         highwayRegex: String,
         bearingDeg: Double? = null,
         explored: ExploredArea? = null,
+        minRadiusMeters: Double = 0.0,
     ): LatLon {
         // Small circles are cheap to fetch whole.
         if (radiusMeters <= 1500) {
             return pickPoint(
                 fetchRoads(center, radiusMeters, highwayRegex),
-                center, radiusMeters, bearingDeg, explored,
+                center, radiusMeters, bearingDeg, explored, minRadiusMeters,
             ) ?: throw IOException("No roads found within radius")
         }
 
@@ -56,14 +57,15 @@ object RoadRoulette {
         for (attempt in 0 until 4) {
             // Prefer sampling sub-areas the fog of war hasn't uncovered yet.
             val sample = generateSequence {
-                randomPointInCircle(center, radiusMeters, bearingDeg)
+                randomPointInCircle(center, radiusMeters, bearingDeg, minRadiusMeters)
             }.take(6).firstOrNull { explored?.isExplored(it) != true }
-                ?: randomPointInCircle(center, radiusMeters, bearingDeg)
+                ?: randomPointInCircle(center, radiusMeters, bearingDeg, minRadiusMeters)
             // 600 m, 2.4 km, 5.4 km, 9.6 km — widen only if the spot was empty.
             val searchRadius = min(600.0 * (attempt + 1) * (attempt + 1), radiusMeters)
             try {
                 val ways = fetchRoads(sample, searchRadius, highwayRegex)
-                pickPoint(ways, center, radiusMeters, bearingDeg, explored)?.let { return it }
+                pickPoint(ways, center, radiusMeters, bearingDeg, explored, minRadiusMeters)
+                    ?.let { return it }
             } catch (e: IOException) {
                 lastError = e
             }
@@ -72,20 +74,24 @@ object RoadRoulette {
     }
 
     /**
-     * Uniform-by-area random point inside the circle; with [bearingDeg] set,
+     * Uniform-by-area random point in the [minRadiusMeters, radiusMeters] annulus
+     * (an inner radius of 0 is just the full circle); with [bearingDeg] set,
      * constrained to a ±45° wedge in that compass direction.
      */
     fun randomPointInCircle(
         center: LatLon,
         radiusMeters: Double,
         bearingDeg: Double? = null,
+        minRadiusMeters: Double = 0.0,
     ): LatLon {
         val theta = if (bearingDeg == null) {
             Random.nextDouble(2 * PI)
         } else {
             Math.toRadians(bearingDeg) + Random.nextDouble(-PI / 4, PI / 4)
         }
-        return offset(center, radiusMeters * sqrt(Random.nextDouble()), theta)
+        val minR = minRadiusMeters.coerceIn(0.0, radiusMeters)
+        val r = sqrt(minR * minR + Random.nextDouble() * (radiusMeters * radiusMeters - minR * minR))
+        return offset(center, r, theta)
     }
 
     /** Compass bearing from [from] to [to], degrees 0–360 (0 = north). */
@@ -119,6 +125,7 @@ object RoadRoulette {
         radiusMeters: Double,
         bearingDeg: Double? = null,
         explored: ExploredArea? = null,
+        minRadiusMeters: Double = 0.0,
     ): LatLon? {
         data class Segment(val a: LatLon, val b: LatLon, val weight: Double)
 
@@ -129,7 +136,8 @@ object RoadRoulette {
                 val a = pts[i]
                 val b = pts[i + 1]
                 val mid = LatLon((a.lat + b.lat) / 2, (a.lon + b.lon) / 2)
-                if (distanceMeters(center, mid) <= radiusMeters &&
+                val dist = distanceMeters(center, mid)
+                if (dist in minRadiusMeters..radiusMeters &&
                     (bearingDeg == null || withinWedge(center, mid, bearingDeg, 50.0))
                 ) {
                     val factor = if (explored?.isExplored(mid) == true)
@@ -169,6 +177,52 @@ object RoadRoulette {
         """.trimIndent()
 
         return parseWays(rawQuery(query, endpointOffset))
+    }
+
+    /**
+     * Posted speed limit (km/h) of the road nearest [point], via Overpass —
+     * for the ambient speed badge while driving with no active route (which
+     * would otherwise carry this from GraphHopper's path details). Null when
+     * nothing tagged is nearby, or the tag isn't a plain number/mph value.
+     */
+    fun nearestSpeedLimitKmh(point: LatLon, radiusMeters: Double = 40.0): Double? {
+        val query = """
+            [out:json][timeout:8];
+            way(around:${radiusMeters.toInt()},${point.lat},${point.lon})["maxspeed"];
+            out tags geom;
+        """.trimIndent()
+        val json = try {
+            rawQuery(query)
+        } catch (e: IOException) {
+            return null
+        }
+        val elements = JSONObject(json).getJSONArray("elements")
+        var best: Double? = null
+        var bestDist = Double.MAX_VALUE
+        for (i in 0 until elements.length()) {
+            val el = elements.getJSONObject(i)
+            val raw = el.optJSONObject("tags")?.optString("maxspeed")
+                ?.takeIf { it.isNotBlank() } ?: continue
+            val kmh = parseMaxSpeed(raw) ?: continue
+            val geometry = el.optJSONArray("geometry") ?: continue
+            for (j in 0 until geometry.length()) {
+                val p = geometry.getJSONObject(j)
+                val d = distanceMeters(point, LatLon(p.getDouble("lat"), p.getDouble("lon")))
+                if (d < bestDist) {
+                    bestDist = d
+                    best = kmh
+                }
+            }
+        }
+        return best
+    }
+
+    private fun parseMaxSpeed(raw: String): Double? {
+        val v = raw.trim().lowercase()
+        return when {
+            v.endsWith("mph") -> v.removeSuffix("mph").trim().toDoubleOrNull()?.times(1.60934)
+            else -> v.toDoubleOrNull() // skips "walk"/"none"/"signals"/etc.
+        }
     }
 
     /** Runs an Overpass query, rotating across mirrors on failure. */

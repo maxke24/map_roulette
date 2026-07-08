@@ -32,6 +32,7 @@ object PoiRoulette {
         kind: PoiKind,
         bearingDeg: Double?,
         explored: ExploredArea? = null,
+        minRadiusMeters: Double = 0.0,
     ): Poi {
         val around = "(around:${radiusMeters.toInt()},${center.lat},${center.lon})"
         val query = """
@@ -41,7 +42,7 @@ object PoiRoulette {
         """.trimIndent()
 
         val elements = JSONObject(RoadRoulette.rawQuery(query)).getJSONArray("elements")
-        val pois = ArrayList<Poi>(elements.length())
+        val allPois = ArrayList<Poi>(elements.length())
         for (i in 0 until elements.length()) {
             val el = elements.getJSONObject(i)
             val lat: Double
@@ -60,10 +61,17 @@ object PoiRoulette {
             ) continue
             val name = el.optJSONObject("tags")?.optString("name").takeUnless { it.isNullOrBlank() }
                 ?: kind.label
-            pois.add(Poi(location, name))
+            allPois.add(Poi(location, name))
         }
-        if (pois.isEmpty()) {
+        if (allPois.isEmpty()) {
             throw IOException("No ${kind.label.lowercase()} found here — try a larger radius")
+        }
+        val pois = if (minRadiusMeters <= 0.0) allPois
+            else allPois.filter { RoadRoulette.distanceMeters(center, it.location) >= minRadiusMeters }
+        if (pois.isEmpty()) {
+            throw IOException(
+                "No ${kind.label.lowercase()} found past the minimum distance — " +
+                    "try a larger radius or a smaller minimum")
         }
         // Prefer POIs in undiscovered territory; visited ones keep a small chance.
         val fresh = if (explored == null) pois
