@@ -1406,6 +1406,17 @@ private fun ActiveTripCard(stats: TripStats) {
             StatItem("Speed", formatSpeedKmh(stats.currentSpeedMps))
             StatItem("Top", formatSpeedKmh(stats.topSpeedMps))
         }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            StatItem("Lean", formatLeanAngle(stats.currentLeanAngleDeg))
+            StatItem("Max lean", formatLeanAngle(stats.maxLeanAngleDeg))
+            StatItem("G-force", formatGForce(stats.currentGForce))
+            StatItem("Max G", formatGForce(stats.maxGForce))
+        }
     }
 }
 

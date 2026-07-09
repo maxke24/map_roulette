@@ -10,6 +10,8 @@ data class Trip(
     val endTimeMs: Long,
     val distanceMeters: Double,
     val topSpeedMps: Double,
+    val maxLeanAngleDeg: Double = 0.0,
+    val maxGForce: Double = 0.0,
     val destinationLat: Double?,
     val destinationLon: Double?,
 ) {
@@ -34,6 +36,8 @@ object TripStore {
                     .put("endTimeMs", t.endTimeMs)
                     .put("distanceMeters", t.distanceMeters)
                     .put("topSpeedMps", t.topSpeedMps)
+                    .put("maxLeanAngleDeg", t.maxLeanAngleDeg)
+                    .put("maxGForce", t.maxGForce)
                     .put("destinationLat", t.destinationLat ?: JSONObject.NULL)
                     .put("destinationLon", t.destinationLon ?: JSONObject.NULL)
             )
@@ -53,6 +57,8 @@ object TripStore {
                     endTimeMs = o.getLong("endTimeMs"),
                     distanceMeters = o.getDouble("distanceMeters"),
                     topSpeedMps = o.getDouble("topSpeedMps"),
+                    maxLeanAngleDeg = o.optDouble("maxLeanAngleDeg", 0.0),
+                    maxGForce = o.optDouble("maxGForce", 0.0),
                     destinationLat = if (o.isNull("destinationLat")) null else o.getDouble("destinationLat"),
                     destinationLon = if (o.isNull("destinationLon")) null else o.getDouble("destinationLon"),
                 )

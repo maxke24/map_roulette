@@ -78,6 +78,13 @@ fun HistoryScreen(onBack: () -> Unit) {
                                 TripStat("Avg", formatSpeedKmh(trip.avgSpeedMps))
                                 TripStat("Top", formatSpeedKmh(trip.topSpeedMps))
                             }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                TripStat("Max lean", formatLeanAngle(trip.maxLeanAngleDeg))
+                                TripStat("Max G", formatGForce(trip.maxGForce))
+                            }
                         }
                     }
                 }

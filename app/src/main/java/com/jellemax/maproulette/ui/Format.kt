@@ -19,3 +19,7 @@ fun formatDistanceKm(meters: Double): String =
 
 fun formatDate(timeMs: Long): String =
     SimpleDateFormat("EEE d MMM yyyy, HH:mm", Locale.getDefault()).format(Date(timeMs))
+
+fun formatLeanAngle(deg: Double): String = "%.0f°".format(deg)
+
+fun formatGForce(g: Double): String = "%.1f g".format(g)

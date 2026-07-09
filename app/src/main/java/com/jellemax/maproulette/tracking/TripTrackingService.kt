@@ -8,6 +8,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.os.Build
 import android.os.IBinder
@@ -43,6 +47,10 @@ data class TripStats(
     val distanceMeters: Double = 0.0,
     val currentSpeedMps: Double = 0.0,
     val topSpeedMps: Double = 0.0,
+    val currentLeanAngleDeg: Double = 0.0,
+    val maxLeanAngleDeg: Double = 0.0,
+    val currentGForce: Double = 0.0,
+    val maxGForce: Double = 0.0,
 )
 
 /** Latest GPS fix, published live for the map (fog, navigation). */
@@ -124,6 +132,7 @@ class TripTrackingService : Service() {
     }
 
     private lateinit var fusedClient: FusedLocationProviderClient
+    private lateinit var sensorManager: SensorManager
     private var lastLocation: Location? = null
     private var destLat: Double? = null
     private var destLon: Double? = null
@@ -145,6 +154,55 @@ class TripTrackingService : Service() {
         }
     }
 
+    private val rotationMatrix = FloatArray(9)
+    private val orientationAngles = FloatArray(3)
+
+    /**
+     * Lean angle (roll, from the rotation-vector sensor) and g-force
+     * (accelerometer magnitude) only make sense while a trip is running, so
+     * these sensors are only registered between [beginTrip] and [endTrip].
+     * Lean angle assumes the phone is mounted upright facing forward, e.g. a
+     * handlebar mount — a phone in a pocket will read garbage.
+     */
+    private val sensorListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val stats = _stats.value ?: return
+            when (event.sensor.type) {
+                Sensor.TYPE_ROTATION_VECTOR -> {
+                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
+                    val leanDeg = Math.toDegrees(orientationAngles[2].toDouble())
+                    _stats.value = stats.copy(
+                        currentLeanAngleDeg = leanDeg,
+                        maxLeanAngleDeg = maxOf(stats.maxLeanAngleDeg, kotlin.math.abs(leanDeg)),
+                    )
+                }
+                Sensor.TYPE_ACCELEROMETER -> {
+                    val (x, y, z) = event.values
+                    val gForce = kotlin.math.sqrt((x * x + y * y + z * z).toDouble()) /
+                        SensorManager.GRAVITY_EARTH
+                    _stats.value = stats.copy(
+                        currentGForce = gForce,
+                        maxGForce = maxOf(stats.maxGForce, gForce),
+                    )
+                }
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    private fun startMotionSensors() {
+        val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        rotation?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_GAME) }
+        accel?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_GAME) }
+    }
+
+    private fun stopMotionSensors() {
+        sensorManager.unregisterListener(sensorListener)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Settings.init(this)
         createChannel()
@@ -157,6 +215,9 @@ class TripTrackingService : Service() {
         )
         if (!::fusedClient.isInitialized) {
             fusedClient = LocationServices.getFusedLocationProviderClient(this)
+        }
+        if (!::sensorManager.isInitialized) {
+            sensorManager = getSystemService(SensorManager::class.java)
         }
 
         when (intent?.action) {
@@ -187,11 +248,13 @@ class TripTrackingService : Service() {
         lastMovingMs = System.currentTimeMillis()
         _stats.value = TripStats(startTimeMs = System.currentTimeMillis())
         ensureLocationUpdates()
+        startMotionSensors()
         updateNotification()
     }
 
     private fun endTrip() {
         val stats = _stats.value ?: return
+        stopMotionSensors()
         flushTrace()
         val worthSaving =
             if (autoStarted) stats.distanceMeters >= MIN_AUTO_TRIP_METERS
@@ -204,6 +267,8 @@ class TripTrackingService : Service() {
                     endTimeMs = System.currentTimeMillis(),
                     distanceMeters = stats.distanceMeters,
                     topSpeedMps = stats.topSpeedMps,
+                    maxLeanAngleDeg = stats.maxLeanAngleDeg,
+                    maxGForce = stats.maxGForce,
                     destinationLat = destLat,
                     destinationLon = destLon,
                 ),
