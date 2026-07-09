@@ -12,6 +12,8 @@ import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,6 +74,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -143,6 +146,17 @@ private val TravelMode.icon: ImageVector
         TravelMode.MOTO -> Icons.Default.TwoWheeler
         TravelMode.CAR -> Icons.Default.DirectionsCar
     }
+
+/** Exponentially smooths a compass bearing toward [target], taking the
+ *  shortest way round the 0/360 wrap, so heading-up rotation eases instead
+ *  of snapping to each noisy raw GPS fix. */
+private fun smoothBearing(current: Float?, target: Float, alpha: Float = 0.3f): Float {
+    if (current == null) return target
+    var delta = (target - current) % 360f
+    if (delta > 180f) delta -= 360f
+    if (delta < -180f) delta += 360f
+    return (current + delta * alpha + 360f) % 360f
+}
 
 /** One spin result awaiting a pick; [route] is null when the routing server
  *  couldn't be reached — the card then shows straight-line distance only. */
@@ -242,6 +256,10 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     var ambientSpeedLimitKmh by remember { mutableStateOf<Double?>(null) }
     var lastSpeedLimitQueryPos by remember { mutableStateOf<LatLon?>(null) }
     var lastSpeedLimitQueryMs by remember { mutableLongStateOf(0L) }
+    var speedLimitMisses by remember { mutableIntStateOf(0) }
+    // Raw GPS bearing jitters between fixes; smoothed heading feeds mapOrientation
+    // so heading-up rotation doesn't snap every ~500ms-1s update.
+    var smoothedBearingDeg by remember { mutableStateOf<Float?>(null) }
 
     LaunchedEffect(liveFix) {
         liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
@@ -466,6 +484,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         navigating = false
         navProgress = null
         mapView.mapOrientation = 0f
+        smoothedBearingDeg = null
         mapView.invalidate()
         NavRelay.clear(context)
     }
@@ -508,18 +527,34 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     // Ambient speed-limit badge while just driving (not navigating): throttled
     // so we don't hammer Overpass every GPS fix — requery only after moving
     // ~150m or 20s, matching NavEngine's own speedLimitKmh via GraphHopper.
-    LaunchedEffect(liveFix, navigating) {
+    // Keyed on `navigating` only (not `liveFix`) and collecting the fix flow
+    // ourselves: keying on liveFix restarted this effect on every GPS update
+    // (every ~0.5-1s), which cancelled the in-flight Overpass request before
+    // a slower mirror could ever answer — the badge could go stale for as
+    // long as the network round-trip kept losing that race.
+    LaunchedEffect(navigating) {
         if (navigating) return@LaunchedEffect
-        val fix = liveFix ?: return@LaunchedEffect
-        if (fix.speedMps < 2.0) return@LaunchedEffect
-        val pos = LatLon(fix.lat, fix.lon)
-        val moved = lastSpeedLimitQueryPos?.let { RoadRoulette.distanceMeters(it, pos) }
-            ?: Double.MAX_VALUE
-        val now = System.currentTimeMillis()
-        if (moved < 150.0 && now - lastSpeedLimitQueryMs < 20_000) return@LaunchedEffect
-        lastSpeedLimitQueryPos = pos
-        lastSpeedLimitQueryMs = now
-        ambientSpeedLimitKmh = withContext(Dispatchers.IO) { RoadRoulette.nearestSpeedLimitKmh(pos) }
+        TripTrackingService.lastFix.collect { fix ->
+            fix ?: return@collect
+            if (fix.speedMps < 2.0) return@collect
+            val pos = LatLon(fix.lat, fix.lon)
+            val moved = lastSpeedLimitQueryPos?.let { RoadRoulette.distanceMeters(it, pos) }
+                ?: Double.MAX_VALUE
+            val now = System.currentTimeMillis()
+            if (moved < 150.0 && now - lastSpeedLimitQueryMs < 20_000) return@collect
+            lastSpeedLimitQueryPos = pos
+            lastSpeedLimitQueryMs = now
+            val result = withContext(Dispatchers.IO) { RoadRoulette.nearestSpeedLimitKmh(pos) }
+            if (result != null) {
+                ambientSpeedLimitKmh = result
+                speedLimitMisses = 0
+            } else if (++speedLimitMisses >= 3) {
+                // One missed lookup is usually a gap in tagged ways or a network
+                // blip, not the limit actually ending — only clear the sign after
+                // a few in a row so it doesn't flicker away and back.
+                ambientSpeedLimitKmh = null
+            }
+        }
     }
 
     // Recenter on the rider while driving with no destination set — same jitter
@@ -534,7 +569,9 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             lastCenteredPos = pos
         }
         if (fix.bearingDeg != null && fix.speedMps > 2.0) {
-            mapView.mapOrientation = -fix.bearingDeg
+            val smoothed = smoothBearing(smoothedBearingDeg, fix.bearingDeg)
+            smoothedBearingDeg = smoothed
+            mapView.mapOrientation = -smoothed
         }
     }
 
@@ -560,7 +597,9 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         }
         if (fix.bearingDeg != null && fix.speedMps > 2.0) {
             // Heading-up while moving; osmdroid rotates counterclockwise.
-            mapView.mapOrientation = -fix.bearingDeg
+            val smoothed = smoothBearing(smoothedBearingDeg, fix.bearingDeg)
+            smoothedBearingDeg = smoothed
+            mapView.mapOrientation = -smoothed
         }
 
         // Arrived (point-to-point; loops end back at the start on their own).
@@ -1252,7 +1291,9 @@ private fun AmbientSpeedBadge(speedKmh: Double, limitKmh: Double?, modifier: Mod
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SpeedLimitSign(limitKmh)
+            Crossfade(targetState = limitKmh, animationSpec = tween(300), label = "speedLimit") {
+                SpeedLimitSign(it)
+            }
             Text(
                 "%.0f".format(speedKmh),
                 style = MaterialTheme.typography.headlineSmall,

@@ -78,10 +78,10 @@ class FogOverlay(
             )
         }
 
-        // Overlay canvas may be translated during scroll; anchor to screen.
-        canvas.save()
-        canvas.setMatrix(null)
+        // buf was built from projection.toPixels(), which is unrotated map-pixel
+        // space — same space every other overlay draws in. Blit it through the
+        // canvas's ambient transform (osmdroid rotates the canvas for heading-up
+        // mode, not the projected points) so it stays aligned with the map.
         canvas.drawBitmap(buf, 0f, 0f, null)
-        canvas.restore()
     }
 }
