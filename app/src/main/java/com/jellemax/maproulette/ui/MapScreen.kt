@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationSearching
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.People
@@ -54,6 +56,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -63,12 +66,12 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -102,6 +105,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.data.Account
 import com.jellemax.maproulette.data.ExploredArea
+import com.jellemax.maproulette.data.FriendFog
 import com.jellemax.maproulette.data.GeocodeResult
 import com.jellemax.maproulette.data.Geocoder
 import com.jellemax.maproulette.data.LatLon
@@ -241,8 +245,10 @@ fun MapScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var mode by rememberSaveable { mutableStateOf(TravelMode.CAR) }
-    var radiusKm by rememberSaveable { mutableFloatStateOf(TravelMode.CAR.defaultKm) }
+    // Persisted, because the tracking service reads it too: an auto-detected
+    // trip has no other way to know whether it is a ride or a drive.
+    val mode by Settings.tripMode.collectAsStateWithLifecycle()
+    var radiusKm by rememberSaveable { mutableFloatStateOf(Settings.tripMode.value.defaultKm) }
     var minRadiusKm by rememberSaveable { mutableFloatStateOf(0f) }
     var candidates by remember { mutableStateOf<List<RouteCandidate>>(emptyList()) }
     var myLocation by remember { mutableStateOf<LatLon?>(null) }
@@ -263,6 +269,13 @@ fun MapScreen(
     val storeVersion by TraceStore.version.collectAsStateWithLifecycle()
     val traces = remember(storeVersion) {
         TraceStore.loadAll(context).map { trace -> trace.map { GeoPoint(it.lat, it.lon) } }
+    }
+    // Friends' territory, unioned into the same fog. Empty unless both sides
+    // opted in; the overlay can't tell whose trace is whose, and neither can we.
+    val shareFog by Settings.shareFog.collectAsStateWithLifecycle()
+    val friendTraceSource by FriendFog.traces.collectAsStateWithLifecycle()
+    val friendTraces = remember(friendTraceSource) {
+        friendTraceSource.map { trace -> trace.map { GeoPoint(it.lat, it.lon) } }
     }
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
     val liveFix by TripTrackingService.lastFix.collectAsStateWithLifecycle()
@@ -312,6 +325,13 @@ fun MapScreen(
                 }
             }
         }
+    }
+
+    // Re-fetch when sharing is switched on, and drop what we hold the moment it
+    // is switched off — a stale union would keep revealing a friend's roads.
+    LaunchedEffect(shareFog) {
+        if (shareFog) withContext(Dispatchers.IO) { FriendFog.refresh(context) }
+        else FriendFog.clear()
     }
 
     // CARTO basemaps (retina): clean modern cartography, light + dark variant.
@@ -430,7 +450,7 @@ fun MapScreen(
 
     // Redraw overlays whenever location, radius, destination, or route changes.
     LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
-        fogEnabled, fogRadius, traces, liveTrace, navigating, cameraActive) {
+        fogEnabled, fogRadius, traces, friendTraces, liveTrace, navigating, cameraActive) {
         mapView.overlays.clear()
         if (!navigating) {
             // Long-press drops a destination pin anywhere.
@@ -447,7 +467,8 @@ fun MapScreen(
         }
         if (fogEnabled) {
             val live = liveTrace.map { GeoPoint(it.lat, it.lon) }
-            val all = if (live.size >= 2) traces + listOf(live) else traces
+            val mine = if (live.size >= 2) traces + listOf(live) else traces
+            val all = mine + friendTraces
             mapView.overlays.add(FogOverlay(
                 tracesProvider = { all },
                 currentLocationProvider = {
@@ -800,288 +821,277 @@ fun MapScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+    fun selectMode(m: TravelMode) {
+        if (m == mode) return
+        Settings.setTripMode(m)
+        radiusKm = m.defaultKm
+        minRadiusKm = 0f
+        destination = null
+        destinationName = null
+        route = null
+        candidates = emptyList()
+    }
 
-        if (navigating) {
-            NavigationBanner(
-                progress = navProgress,
-                rerouting = rerouting,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(12.dp),
-            )
-        } else {
-            Column(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .statusBarsPadding()
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SmallFloatingActionButton(onClick = { followMe = !followMe }) {
-                    Icon(
-                        if (followMe) Icons.Default.MyLocation else Icons.Default.LocationSearching,
-                        contentDescription = if (followMe) "Stop following my location"
-                            else "Follow my location",
-                    )
-                }
-                SmallFloatingActionButton(onClick = { searchOpen = true }) {
-                    Icon(Icons.Default.Search, contentDescription = "Search destination")
-                }
-                SmallFloatingActionButton(onClick = onOpenHistory) {
-                    Icon(Icons.Default.History, contentDescription = "Trip history")
-                }
-                SmallFloatingActionButton(onClick = onOpenBadges) {
-                    Icon(Icons.Default.EmojiEvents, contentDescription = "Badges")
-                }
-                SmallFloatingActionButton(onClick = onOpenFriends) {
-                    Icon(Icons.Default.People, contentDescription = "Friends")
-                }
-                SmallFloatingActionButton(onClick = onOpenSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings")
-                }
-                SmallFloatingActionButton(onClick = { fogEnabled = !fogEnabled }) {
-                    Icon(
-                        if (fogEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                        contentDescription = "Fog of war",
-                    )
-                }
-            }
-        }
-
-        Column(
+    Scaffold(
+        // Modes are the app's top-level places, so they live in the one bar that
+        // is always in reach of a thumb. Navigation hides it: nothing to switch
+        // to mid-route, and the map wants the pixels.
+        bottomBar = { if (!navigating) ModeBar(mode, ::selectMode) },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { scaffoldPadding ->
+        Box(
             Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .fillMaxSize()
+                .padding(bottom = scaffoldPadding.calculateBottomPadding()),
         ) {
-            // Above everything else and centred: this is the number you glance at.
-            liveFix?.takeIf { it.speedMps >= 1.4 }?.let {
-                SpeedHud(
-                    speedKmh = displaySpeedKmh,
-                    limitKmh = if (navigating) navProgress?.speedLimitKmh
-                        else ambientSpeedLimitKmh,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
+            AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+
+            if (navigating) {
+                NavigationBanner(
+                    progress = navProgress,
+                    rerouting = rerouting,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(12.dp),
+                )
+            } else {
+                MapToolbar(
+                    followMe = followMe,
+                    fogEnabled = fogEnabled,
+                    onToggleFollow = { followMe = !followMe },
+                    onSearch = { searchOpen = true },
+                    onToggleFog = { fogEnabled = !fogEnabled },
+                    onOpenHistory = onOpenHistory,
+                    onOpenBadges = onOpenBadges,
+                    onOpenFriends = onOpenFriends,
+                    onOpenSettings = onOpenSettings,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .statusBarsPadding()
+                        .padding(12.dp),
                 )
             }
 
-            stats?.let { ActiveTripCard(it) }
-
-            if (navigating) NavigationBottomBar(
-                progress = navProgress,
-                offRoute = (navProgress?.offRouteMeters ?: 0.0) > 60,
-                onExit = { stopNavigation() },
-            ) else if (candidates.isNotEmpty()) CandidatesCard(
-                candidates = candidates,
-                onPick = { c ->
-                    destination = c.destination
-                    destinationName = c.name
-                    route = c.route
-                    candidates = emptyList()
-                    val loc = myLocation
-                    if (loc != null) {
-                        mapView.zoomToBoundingBox(
-                            BoundingBox.fromGeoPoints(
-                                listOf(GeoPoint(loc.lat, loc.lon),
-                                    GeoPoint(c.destination.lat, c.destination.lon))
-                            ).increaseByScale(1.4f),
-                            true,
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .then(if (navigating) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Ending a trip used to mean expanding the spin card and hunting
+                // for a button. It now sits here whatever else is on screen, on
+                // the opposite side from the speed you are looking at anyway.
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    if (stats != null) {
+                        EndTripButton(onClick = { TripTrackingService.stop(context) })
+                    } else {
+                        Spacer(Modifier.width(1.dp))
+                    }
+                    liveFix?.takeIf { it.speedMps >= 1.4 }?.let {
+                        SpeedHud(
+                            speedKmh = displaySpeedKmh,
+                            limitKmh = if (navigating) navProgress?.speedLimitKmh
+                                else ambientSpeedLimitKmh,
                         )
                     }
-                },
-                onReroll = { candidates = emptyList(); spin() },
-                onCancel = { candidates = emptyList() },
-            ) else if (settingsCollapsed) CollapsedSettingsBar(
-                mode = mode,
-                radiusKm = radiusKm,
-                onExpand = { settingsCollapsed = false },
-            ) else Card(
-                shape = MaterialTheme.shapes.extraLarge,
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                ),
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
-                        IconButton(
-                            onClick = { settingsCollapsed = true },
-                            modifier = Modifier.size(28.dp),
-                        ) {
-                            Icon(Icons.Default.ExpandMore, contentDescription = "Minimize")
-                        }
-                    }
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        TravelMode.entries.forEachIndexed { index, m ->
-                            SegmentedButton(
-                                selected = mode == m,
-                                onClick = {
-                                    mode = m
-                                    radiusKm = m.defaultKm
-                                    minRadiusKm = 0f
-                                    destination = null
-                                    destinationName = null
-                                    route = null
-                                    candidates = emptyList()
-                                },
-                                shape = SegmentedButtonDefaults.itemShape(
-                                    index = index, count = TravelMode.entries.size,
-                                ),
-                                icon = {
-                                    Icon(m.icon, contentDescription = null,
-                                        Modifier.size(SegmentedButtonDefaults.IconSize))
-                                },
-                                label = { Text(m.label, maxLines = 1) },
+                }
+
+                stats?.let { ActiveTripCard(it) }
+
+                if (navigating) NavigationBottomBar(
+                    progress = navProgress,
+                    offRoute = (navProgress?.offRouteMeters ?: 0.0) > 60,
+                    onExit = { stopNavigation() },
+                ) else if (candidates.isNotEmpty()) CandidatesCard(
+                    candidates = candidates,
+                    onPick = { c ->
+                        destination = c.destination
+                        destinationName = c.name
+                        route = c.route
+                        candidates = emptyList()
+                        val loc = myLocation
+                        if (loc != null) {
+                            mapView.zoomToBoundingBox(
+                                BoundingBox.fromGeoPoints(
+                                    listOf(GeoPoint(loc.lat, loc.lon),
+                                        GeoPoint(c.destination.lat, c.destination.lon))
+                                ).increaseByScale(1.4f),
+                                true,
                             )
                         }
-                    }
+                    },
+                    onReroll = { candidates = emptyList(); spin() },
+                    onCancel = { candidates = emptyList() },
+                ) else if (settingsCollapsed) CollapsedSpinBar(
+                    mode = mode,
+                    radiusKm = radiusKm,
+                    spinning = spinning,
+                    onSpin = { if (spinning) spinJob?.cancel() else spin() },
+                    onExpand = { settingsCollapsed = false },
+                ) else Card(
+                    shape = MaterialTheme.shapes.extraLarge,
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ),
+                ) {
+                    Column(Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (mode.roundTrip) "Loop" else "Destination",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            IconButton(
+                                onClick = { settingsCollapsed = true },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Icon(Icons.Default.ExpandMore, contentDescription = "Minimize")
+                            }
+                        }
 
-                    error?.let {
-                        Text(it, color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodySmall)
-                    }
+                        error?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall)
+                        }
 
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text(
-                            if (mode.roundTrip) "Trip length" else "Radius",
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                        Text(
-                            if (mode.maxKm <= 10f) "%.1f km".format(radiusKm)
-                            else "${radiusKm.toInt()} km",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                    route?.distanceMeters?.let {
-                        Text(
-                            "Loop found: ${formatDistanceKm(it)}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    destinationName?.let {
-                        Text("→ $it", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Slider(
-                        value = radiusKm,
-                        onValueChange = { radiusKm = it },
-                        valueRange = mode.minKm..mode.maxKm,
-                    )
-
-                    if (!mode.roundTrip) {
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
-                            Text("Min distance", style = MaterialTheme.typography.labelLarge)
                             Text(
-                                if (minRadiusKm <= 0f) "Off"
-                                else if (mode.maxKm <= 10f) "%.1f km".format(minRadiusKm)
-                                else "${minRadiusKm.toInt()} km",
+                                if (mode.roundTrip) "Trip length" else "Radius",
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            Text(
+                                if (mode.maxKm <= 10f) "%.1f km".format(radiusKm)
+                                else "${radiusKm.toInt()} km",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.Bold,
                             )
                         }
+                        route?.distanceMeters?.let {
+                            Text(
+                                "Loop found: ${formatDistanceKm(it)}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        destinationName?.let {
+                            Text("→ $it", style = MaterialTheme.typography.bodySmall)
+                        }
                         Slider(
-                            value = minRadiusKm,
-                            onValueChange = { minRadiusKm = it },
-                            valueRange = 0f..radiusKm,
+                            value = radiusKm,
+                            onValueChange = { radiusKm = it },
+                            valueRange = mode.minKm..mode.maxKm,
                         )
-                    }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (!mode.roundTrip) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("Min distance", style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    if (minRadiusKm <= 0f) "Off"
+                                    else if (mode.maxKm <= 10f) "%.1f km".format(minRadiusKm)
+                                    else "${minRadiusKm.toInt()} km",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                            Slider(
+                                value = minRadiusKm,
+                                onValueChange = { minRadiusKm = it },
+                                valueRange = 0f..radiusKm,
+                            )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (!mode.roundTrip) {
+                                SelectorChip(
+                                    icon = Icons.Default.Place,
+                                    label = poiKind.label,
+                                    options = PoiKind.entries.map { it.label },
+                                    onSelect = { poiKind = PoiKind.entries[it] },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                             SelectorChip(
-                                icon = Icons.Default.Place,
-                                label = poiKind.label,
-                                options = PoiKind.entries.map { it.label },
-                                onSelect = { poiKind = PoiKind.entries[it] },
+                                icon = Icons.Default.Explore,
+                                label = directionDeg?.let { DIRECTION_NAMES[(it / 45f).toInt()] }
+                                    ?: "Any direction",
+                                options = listOf("Any direction") + DIRECTION_NAMES,
+                                onSelect = { i ->
+                                    directionDeg = if (i == 0) null else (i - 1) * 45f
+                                },
                                 modifier = Modifier.weight(1f),
                             )
                         }
-                        SelectorChip(
-                            icon = Icons.Default.Explore,
-                            label = directionDeg?.let { DIRECTION_NAMES[(it / 45f).toInt()] }
-                                ?: "Any direction",
-                            options = listOf("Any direction") + DIRECTION_NAMES,
-                            onSelect = { i ->
-                                directionDeg = if (i == 0) null else (i - 1) * 45f
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
 
-                    Button(
-                        onClick = { if (spinning) spinJob?.cancel() else spin() },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                    ) {
-                        if (spinning) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Default.Casino, contentDescription = null,
-                                Modifier.size(20.dp))
+                        Button(
+                            onClick = { if (spinning) spinJob?.cancel() else spin() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                        ) {
+                            if (spinning) {
+                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Casino, contentDescription = null,
+                                    Modifier.size(20.dp))
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                if (spinning) "Cancel" else "Spin",
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                            )
                         }
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            if (spinning) "Cancel" else "Spin",
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                        )
-                    }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        NavButton(
-                            destination = destination,
-                            route = route?.waypoints,
-                            origin = myLocation,
-                            mode = mode,
-                            inAppAvailable = serverConfig.usable &&
-                                (destination != null ||
-                                    route?.instructions?.isNotEmpty() == true),
-                            onNavigateInApp = { startNavigation() },
-                            onNavigate = {
-                                // Heading out = start tracking automatically.
-                                if (stats == null) {
-                                    TripTrackingService.start(
-                                        context, destination?.lat, destination?.lon)
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (stats == null) {
-                            OutlinedButton(
-                                onClick = {
-                                    TripTrackingService.start(
-                                        context, destination?.lat, destination?.lon)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            NavButton(
+                                destination = destination,
+                                route = route?.waypoints,
+                                origin = myLocation,
+                                mode = mode,
+                                inAppAvailable = serverConfig.usable &&
+                                    (destination != null ||
+                                        route?.instructions?.isNotEmpty() == true),
+                                onNavigateInApp = { startNavigation() },
+                                onNavigate = {
+                                    // Heading out = start tracking automatically.
+                                    if (stats == null) {
+                                        TripTrackingService.start(
+                                            context, destination?.lat, destination?.lon)
+                                    }
                                 },
                                 modifier = Modifier.weight(1f),
-                            ) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null,
-                                    Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Track", maxLines = 1)
-                            }
-                        } else {
-                            Button(
-                                onClick = { TripTrackingService.stop(context) },
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                Icon(Icons.Default.Stop, contentDescription = null,
-                                    Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("End trip", maxLines = 1)
+                            )
+                            if (stats == null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        TripTrackingService.start(
+                                            context, destination?.lat, destination?.lon)
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null,
+                                        Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Track ${mode.label.lowercase()}", maxLines = 1)
+                                }
                             }
                         }
                     }
@@ -1305,18 +1315,117 @@ private fun CandidatesCard(
     }
 }
 
-/** Slim stand-in for the settings card while just cruising — tap to expand. */
+/** The app's three places. Selecting one also tells the tracking service what
+ *  you are riding, which decides the stats it bothers to record. */
 @Composable
-private fun CollapsedSettingsBar(
+private fun ModeBar(selected: TravelMode, onSelect: (TravelMode) -> Unit) {
+    NavigationBar {
+        TravelMode.entries.forEach { m ->
+            NavigationBarItem(
+                selected = m == selected,
+                onClick = { onSelect(m) },
+                icon = { Icon(m.icon, contentDescription = null) },
+                label = { Text(m.label) },
+            )
+        }
+    }
+}
+
+/** Map controls, top-right. Only the three you reach for while moving are
+ *  buttons; the screens you open while parked are behind the overflow, which is
+ *  why this column no longer runs down into whatever the bottom card is showing. */
+@Composable
+private fun MapToolbar(
+    followMe: Boolean,
+    fogEnabled: Boolean,
+    onToggleFollow: () -> Unit,
+    onSearch: () -> Unit,
+    onToggleFog: () -> Unit,
+    onOpenHistory: () -> Unit,
+    onOpenBadges: () -> Unit,
+    onOpenFriends: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SmallFloatingActionButton(onClick = onToggleFollow) {
+            Icon(
+                if (followMe) Icons.Default.MyLocation else Icons.Default.LocationSearching,
+                contentDescription = if (followMe) "Stop following my location"
+                    else "Follow my location",
+            )
+        }
+        SmallFloatingActionButton(onClick = onSearch) {
+            Icon(Icons.Default.Search, contentDescription = "Search destination")
+        }
+        SmallFloatingActionButton(onClick = onToggleFog) {
+            Icon(
+                if (fogEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                contentDescription = "Fog of war",
+            )
+        }
+        Box {
+            SmallFloatingActionButton(onClick = { menuOpen = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = "More")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Trip history") },
+                    leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
+                    onClick = { menuOpen = false; onOpenHistory() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Badges") },
+                    leadingIcon = { Icon(Icons.Default.EmojiEvents, contentDescription = null) },
+                    onClick = { menuOpen = false; onOpenBadges() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Friends") },
+                    leadingIcon = { Icon(Icons.Default.People, contentDescription = null) },
+                    onClick = { menuOpen = false; onOpenFriends() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Settings") },
+                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    onClick = { menuOpen = false; onOpenSettings() },
+                )
+            }
+        }
+    }
+}
+
+/** Always on screen while a trip is running, in the corner your thumb rests in. */
+@Composable
+private fun EndTripButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.height(48.dp),
+        shape = CircleShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.error,
+            contentColor = MaterialTheme.colorScheme.onError,
+        ),
+    ) {
+        Icon(Icons.Default.Stop, contentDescription = null, Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("End trip", maxLines = 1, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Slim stand-in for the spin card while just cruising. Spin stays reachable
+ *  here — collapsing the card used to mean you couldn't spin without expanding it. */
+@Composable
+private fun CollapsedSpinBar(
     mode: TravelMode,
     radiusKm: Float,
+    spinning: Boolean,
+    onSpin: () -> Unit,
     onExpand: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable { onExpand() },
+        modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -1325,34 +1434,52 @@ private fun CollapsedSettingsBar(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier
+                    .weight(1f)
+                    .clickable { onExpand() },
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(mode.icon, contentDescription = null)
                 Text(
-                    "${mode.label} · ${if (mode.maxKm <= 10f) "%.1f".format(radiusKm) else radiusKm.toInt()} km",
+                    "${if (mode.maxKm <= 10f) "%.1f".format(radiusKm) else radiusKm.toInt()} km",
                     style = MaterialTheme.typography.labelLarge,
                 )
+                Icon(Icons.Default.ExpandLess, contentDescription = "Expand")
             }
-            Icon(Icons.Default.ExpandLess, contentDescription = "Expand")
+            Button(onClick = onSpin, shape = CircleShape) {
+                if (spinning) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.Casino, contentDescription = null, Modifier.size(18.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(if (spinning) "Cancel" else "Spin", maxLines = 1)
+            }
         }
     }
 }
 
-/** Current speed, large and centred, next to the posted limit for the road
- *  we're on. Used both while cruising and while navigating; the whole dial
- *  turns red once we're more than 5 km/h over. */
+/** Current speed next to the posted limit for the road we're on. Used both while
+ *  cruising and while navigating; the whole dial turns red once we're more than
+ *  5 km/h over. Sized to be read at a glance, not to dominate the map — the trip
+ *  card no longer repeats the number underneath it. */
 @Composable
 private fun SpeedHud(speedKmh: Double, limitKmh: Double?, modifier: Modifier = Modifier) {
     val speeding = limitKmh != null && speedKmh > limitKmh + 5
     Row(
         modifier,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Crossfade(targetState = limitKmh, animationSpec = tween(300), label = "speedLimit") {
+            SpeedLimitSign(it, size = 48.dp)
+        }
         Card(
             shape = CircleShape,
             colors = CardDefaults.cardColors(
@@ -1362,28 +1489,25 @@ private fun SpeedHud(speedKmh: Double, limitKmh: Double?, modifier: Modifier = M
             elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
         ) {
             Column(
-                Modifier.size(112.dp),
+                Modifier.size(80.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
                     "%.0f".format(speedKmh),
-                    fontSize = 46.sp,
-                    lineHeight = 48.sp,
+                    fontSize = 32.sp,
+                    lineHeight = 34.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (speeding) MaterialTheme.colorScheme.onErrorContainer
                         else MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
                     "km/h",
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = if (speeding) MaterialTheme.colorScheme.onErrorContainer
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        }
-        Crossfade(targetState = limitKmh, animationSpec = tween(300), label = "speedLimit") {
-            SpeedLimitSign(it, size = 72.dp)
         }
     }
 }
@@ -1462,6 +1586,8 @@ private fun NavButton(
     }
 }
 
+/** Live trip numbers, minus the ones already on screen: current speed is the
+ *  HUD, and a car has no lean angle worth printing. */
 @Composable
 private fun ActiveTripCard(stats: TripStats) {
     // Tick every second so duration counts up even without GPS updates.
@@ -1481,24 +1607,19 @@ private fun ActiveTripCard(stats: TripStats) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             StatItem("Time", formatDuration(now - stats.startTimeMs))
             StatItem("Distance", formatDistanceKm(stats.distanceMeters))
-            StatItem("Speed", formatSpeedKmh(stats.currentSpeedMps))
             StatItem("Top", formatSpeedKmh(stats.topSpeedMps))
-        }
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            StatItem("Lean", formatLeanAngle(stats.currentLeanAngleDeg))
-            StatItem("Max lean", formatLeanAngle(stats.maxLeanAngleDeg))
-            StatItem("G-force", formatGForce(stats.currentGForce))
-            StatItem("Max G", formatGForce(stats.maxGForce))
+            if (stats.mode.tracksLean) {
+                StatItem("Lean", formatLeanAngle(stats.currentLeanAngleDeg))
+                StatItem("Max lean", formatLeanAngle(stats.maxLeanAngleDeg))
+            }
+            if (stats.mode.tracksGForce) {
+                StatItem("Max G", formatGForce(stats.maxGForce))
+            }
         }
     }
 }

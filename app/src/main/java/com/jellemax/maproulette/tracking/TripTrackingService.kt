@@ -41,6 +41,7 @@ import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
+import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +52,9 @@ import kotlin.math.sqrt
 
 data class TripStats(
     val startTimeMs: Long,
+    /** Fixed when the trip began. Switching mode tabs mid-ride must not change
+     *  which stats the running trip is recording, or claim to have recorded. */
+    val mode: TravelMode = TravelMode.CAR,
     val durationMs: Long = 0,
     val distanceMeters: Double = 0.0,
     val currentSpeedMps: Double = 0.0,
@@ -109,11 +113,14 @@ class TripTrackingService : Service() {
         private const val FAST_SPEED_MPS = 7.0          // ~25 km/h, no vehicle hint
         private const val PROBE_SPEED_MPS = 4.0         // ~14 km/h, IN_VEHICLE was seen
         private const val FAST_FIXES_TO_START = 3
-        private const val MIN_FAST_RUN_MS = 15_000L
-        private const val MIN_FAST_RUN_METERS = 200.0
+        private const val MIN_FAST_RUN_MS = 8_000L
+        private const val MIN_FAST_RUN_METERS = 120.0
         /** Fixes looser than this never contribute to a start decision. */
         private const val MAX_START_ACCURACY_M = 25f
         private const val PROBE_WINDOW_MS = 3 * 60_000L
+        /** A probe opened by speed alone, with no IN_VEHICLE to back it up. Kept
+         *  short: one freak fix shouldn't buy three minutes of GPS. */
+        private const val SPEED_PROBE_WINDOW_MS = 60_000L
         private const val EXIT_GRACE_MS = 2 * 60_000L   // after IN_VEHICLE exit
         private const val STATIONARY_END_MS = 5 * 60_000L
         private const val MIN_AUTO_TRIP_METERS = 500.0
@@ -248,13 +255,21 @@ class TripTrackingService : Service() {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    private fun startMotionSensors() {
-        val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    /** Registers only the sensors this vehicle has a meaningful reading for, so
+     *  a car trip never records a lean angle and a bicycle wakes neither sensor. */
+    private fun startMotionSensors(mode: TravelMode) {
         // SENSOR_DELAY_UI (~60ms) resolves a lean or a braking spike just as well
         // as SENSOR_DELAY_GAME (~20ms) and wakes the CPU a third as often.
-        rotation?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI) }
-        accel?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI) }
+        if (mode.tracksLean) {
+            sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
+                sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI)
+            }
+        }
+        if (mode.tracksGForce) {
+            sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+                sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI)
+            }
+        }
     }
 
     private fun stopMotionSensors() {
@@ -310,9 +325,11 @@ class TripTrackingService : Service() {
         currentLeanDeg = 0.0; maxLeanDeg = 0.0
         currentG = 0.0; maxG = 0.0
         lastMovingMs = System.currentTimeMillis()
-        _stats.value = TripStats(startTimeMs = startTimeMs)
+        // An auto-started trip has no other way to know what it is riding on.
+        val mode = Settings.tripMode.value
+        _stats.value = TripStats(startTimeMs = startTimeMs, mode = mode)
         ensureLocationUpdates()
-        startMotionSensors()
+        startMotionSensors(mode)
         updateNotification()
     }
 
@@ -336,6 +353,7 @@ class TripTrackingService : Service() {
                     maxGForce = maxG,
                     destinationLat = destLat,
                     destinationLon = destLon,
+                    mode = stats.mode,
                 ),
             )
             SyncClient.syncQuietly(this)
@@ -366,12 +384,14 @@ class TripTrackingService : Service() {
             LocationRequest.Builder(Priority.PRIORITY_PASSIVE, 60_000L)
                 .setMinUpdateDistanceMeters(100f)
                 .build()
-        // Batching is the whole battery win here: the modem wakes once a minute
-        // to hand over a burst instead of every 20 s to hand over one fix.
+        // Still batched, but a burst held for a minute meant a drive that began
+        // 60 s ago was invisible to the start detector for 60 s. IDLE only runs
+        // while you're actually moving around on foot (STILL parks us in SLEEP),
+        // so the shorter window costs little and is what the detector reacts to.
         LocationMode.IDLE ->
-            LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 30_000L)
-                .setMinUpdateDistanceMeters(40f)
-                .setMaxUpdateDelayMillis(60_000L)
+            LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 20_000L)
+                .setMinUpdateDistanceMeters(30f)
+                .setMaxUpdateDelayMillis(20_000L)
                 .setWaitForAccurateLocation(false)
                 .build()
         LocationMode.PROBE ->
@@ -521,6 +541,16 @@ class TripTrackingService : Service() {
         if (speed < (if (probing) PROBE_SPEED_MPS else FAST_SPEED_MPS)) {
             resetStartDetector()
             return
+        }
+
+        // One accurate fix at driving speed is enough to *look closer*, and that
+        // is the whole reason a drive used to take minutes to notice: we waited
+        // for IN_VEHICLE, then confirmed against fixes that arrived every 20 s.
+        // Escalating here puts us on 4 s fixes immediately — the run below is
+        // then confirmed in seconds. The evidence bar for starting is unchanged.
+        if (!probing) {
+            probeUntilMs = System.currentTimeMillis() + SPEED_PROBE_WINDOW_MS
+            stationary = false
         }
 
         val here = LatLon(location.latitude, location.longitude)
@@ -718,17 +748,31 @@ class TripTrackingService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        val stats = _stats.value
         val text = when {
-            _stats.value != null -> "Tracking your drive…"
+            stats != null -> "Tracking your ${stats.mode.label.lowercase()} trip…"
             stationary -> "Standing by"
             else -> "Watching for trips"
         }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Map Roulette")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setContentIntent(contentIntent)
             .setOngoing(true)
-            .build()
+        // Ending a trip from the shade beats unlocking, finding the app, and
+        // hunting for a button — which is the situation you are in at a kerbside.
+        if (stats != null) {
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "End trip",
+                PendingIntent.getForegroundService(
+                    this, 2,
+                    Intent(this, TripTrackingService::class.java).setAction(ACTION_END_TRIP),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+        }
+        return builder.build()
     }
 }

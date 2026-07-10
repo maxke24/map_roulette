@@ -14,6 +14,8 @@ data class Trip(
     val maxGForce: Double = 0.0,
     val destinationLat: Double?,
     val destinationLon: Double?,
+    /** Which vehicle this was. Trips saved before modes existed read as CAR. */
+    val mode: TravelMode = TravelMode.CAR,
 ) {
     val durationMs: Long get() = endTimeMs - startTimeMs
     val avgSpeedMps: Double
@@ -40,6 +42,7 @@ object TripStore {
                     .put("maxGForce", t.maxGForce)
                     .put("destinationLat", t.destinationLat ?: JSONObject.NULL)
                     .put("destinationLon", t.destinationLon ?: JSONObject.NULL)
+                    .put("mode", t.mode.name)
             )
         }
         file(context).writeText(array.toString())
@@ -61,6 +64,7 @@ object TripStore {
                     maxGForce = o.optDouble("maxGForce", 0.0),
                     destinationLat = if (o.isNull("destinationLat")) null else o.getDouble("destinationLat"),
                     destinationLon = if (o.isNull("destinationLon")) null else o.getDouble("destinationLon"),
+                    mode = TravelMode.of(o.optString("mode")),
                 )
             }
         } catch (e: Exception) {

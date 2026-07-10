@@ -4,9 +4,16 @@
 Stores each user's trip history, fog-of-war traces and badges in SQLite, and
 lets users befriend each other and compare aggregate stats.
 
-Privacy rule, enforced in one place (`friend_stats`): **traces and trips are
-never returned for anyone but the authenticated user.** Friends see only the
-aggregate numbers the owner's app computed (total km, top speed, badges, …).
+Privacy rules, each enforced in exactly one place:
+
+  - **Trips are never returned for anyone but their owner.** No endpoint reads
+    another user's `trips` rows at all.
+  - **Traces leave their owner only through `friend_fog`,** and only when both
+    users have set `share_fog`. Sharing is off by default, reciprocal (a user
+    who does not share sees nothing), and revocable — clearing the flag stops
+    the traces being served from the next request on.
+  - Friends otherwise see only the aggregate numbers the owner's app computed
+    (total km, top speed, badges, …), via `friend_stats`.
 
 Protocol
   GET  /health                                  -> "ok"
@@ -14,12 +21,13 @@ Protocol
   POST /auth/login    {username, password}      -> {token, username}
   POST /auth/logout                             -> {} (revokes the bearer token)
   GET  /me                                      -> {username, stats, badges}
-  POST /sync {trips, traces, badges, stats}     -> merged {trips, traces, badges}
+  POST /sync {trips, traces, badges, stats, shareFog?} -> merged {trips, traces, badges}
   GET  /friends                                 -> {friends, incoming, outgoing}
   POST /friends/request {username}              -> {status}
   POST /friends/respond {username, accept}      -> {status}
   POST /friends/remove  {username}              -> {}
   GET  /friends/stats                           -> [{username, stats, badges}]
+  GET  /friends/fog                             -> {sharing, traces: [line, …]}
 
 Everything except /health and /auth/* needs `Authorization: Bearer <token>`.
 
@@ -133,7 +141,8 @@ def init_db():
             iterations INTEGER NOT NULL,
             created_ms INTEGER NOT NULL,
             stats_json TEXT NOT NULL DEFAULT '{}',
-            badges_json TEXT NOT NULL DEFAULT '{}'
+            badges_json TEXT NOT NULL DEFAULT '{}',
+            share_fog  INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS tokens (
             token_hash   TEXT PRIMARY KEY,
@@ -166,6 +175,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
         """
     )
+    # Added after the first release; CREATE TABLE IF NOT EXISTS won't add it to
+    # a database that already exists.
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+    if "share_fog" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN share_fog INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -351,6 +365,12 @@ def do_sync(user, body):
         else json.loads(user["stats_json"])
     )
 
+    # Absent means "leave it alone", so an old client that knows nothing about
+    # shared fog can't silently turn a user's sharing off (or on).
+    share_fog = user["share_fog"]
+    if "shareFog" in body:
+        share_fog = 1 if body["shareFog"] else 0
+
     with _write_lock:
         conn = db()
         for trip in trips_in:
@@ -370,8 +390,8 @@ def do_sync(user, body):
                 (uid, hashlib.sha256(line.encode()).hexdigest(), line),
             )
         conn.execute(
-            "UPDATE users SET badges_json = ?, stats_json = ? WHERE id = ?",
-            (json.dumps(badges), json.dumps(stats), uid),
+            "UPDATE users SET badges_json = ?, stats_json = ?, share_fog = ? WHERE id = ?",
+            (json.dumps(badges), json.dumps(stats), share_fog, uid),
         )
         conn.commit()
 
@@ -529,11 +549,44 @@ def friend_stats(user):
     return out
 
 
+def friend_fog(user):
+    """The only endpoint that returns another user's traces.
+
+    Two conditions, both required, both checked here: the caller shares their
+    own fog, and so does the friend whose traces are about to be handed over.
+    A user who turns sharing off therefore both stops contributing and stops
+    receiving, which is what makes the trade legible.
+
+    Lines come back unattributed — the union is a map, not a per-friend history.
+    """
+    if not user["share_fog"]:
+        return {"sharing": False, "traces": []}
+
+    friend_ids = [
+        row["id"] for row in _friend_rows(user["id"]) if row["status"] == "accepted"
+    ]
+    if not friend_ids:
+        return {"sharing": True, "traces": []}
+
+    placeholders = ",".join("?" * len(friend_ids))
+    rows = db().execute(
+        "SELECT t.line FROM traces t JOIN users u ON u.id = t.user_id"
+        " WHERE t.user_id IN (%s) AND u.share_fog = 1" % placeholders,
+        friend_ids,
+    )
+    return {"sharing": True, "traces": [r["line"] for r in rows]}
+
+
 # --------------------------------------------------------------------------
 # http
 
 
-AUTHED_GET = {"/me": do_me, "/friends": do_friends, "/friends/stats": friend_stats}
+AUTHED_GET = {
+    "/me": do_me,
+    "/friends": do_friends,
+    "/friends/stats": friend_stats,
+    "/friends/fog": friend_fog,
+}
 
 
 class Handler(BaseHTTPRequestHandler):

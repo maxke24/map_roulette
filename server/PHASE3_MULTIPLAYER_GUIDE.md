@@ -49,13 +49,16 @@ Run the script in [Step 6](#step-6--verify) — it checks every item below.
 4. `GET /friends/stats` returns a friend's totals and badges, and contains
    **no** `trips` or `traces` key.
 5. `GET /friends/stats` returns nothing for a friend request that is still pending.
-6. Syncing the same body twice does not duplicate trips, traces or badges.
-7. Eleven wrong passwords from one IP get `429`; a correct password before that
+6. `GET /friends/fog` returns `{"sharing": false, "traces": []}` for a caller who
+   has not opted in, returns nothing for a friend who has not opted in, returns
+   nothing for a pending friend, and never returns any `trips`.
+7. Syncing the same body twice does not duplicate trips, traces or badges.
+8. Eleven wrong passwords from one IP get `429`; a correct password before that
    still gets `200`.
-8. The owner's pre-existing trips and traces are present after `--import-legacy`.
-9. Through the tunnel hostname: works **with** CF Access service-token headers,
-   rejected **without** them.
-10. Service survives a reboot; the SQLite file is covered by backups.
+9. The owner's pre-existing trips and traces are present after `--import-legacy`.
+10. Through the tunnel hostname: works **with** CF Access service-token headers,
+    rejected **without** them.
+11. Service survives a reboot; the SQLite file is covered by backups.
 
 ## Step 0 — back up first, this migration is one-way
 
@@ -246,6 +249,7 @@ to the user verbatim.
 | POST | `/friends/respond` | `{username, accept}` | `{status}` |
 | POST | `/friends/remove` | `{username}` | `{}` |
 | GET | `/friends/stats` | — | `[{username, stats, badges}]` |
+| GET | `/friends/fog` | — | `{sharing, traces}` (see below) |
 
 Merge semantics, all idempotent:
 
@@ -255,6 +259,22 @@ Merge semantics, all idempotent:
   push an earned date forward;
 - **stats** are replaced wholesale by the client's latest — but only when the
   `stats` key is present. A payload without it leaves the stored stats alone.
+- **shareFog** likewise: present in `/sync` sets the flag, absent leaves it be,
+  so an older client cannot silently opt its user in or out.
+
+### Shared fog of war
+
+`/friends/fog` is the **only** endpoint that returns another user's traces, and
+it does so under two conditions that both have to hold:
+
+1. the caller has `share_fog` set, and
+2. so has the friend whose traces are being returned.
+
+Sharing is off by default (including for every account that existed before the
+column did), reciprocal — a user who stops sharing also stops receiving — and
+revocable, taking effect on the very next request. Trips are never returned for
+anyone but their owner, by any endpoint. The lines come back as one unattributed
+list: it is a combined map, not a per-friend history.
 
 Sending `/friends/request` to someone who already requested you accepts their
 request instead of creating a second one.

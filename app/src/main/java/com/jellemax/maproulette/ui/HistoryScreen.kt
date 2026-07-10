@@ -66,7 +66,7 @@ fun HistoryScreen(onBack: () -> Unit) {
                     Card {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
-                                formatDate(trip.startTimeMs),
+                                "${trip.mode.label} · ${formatDate(trip.startTimeMs)}",
                                 style = MaterialTheme.typography.titleSmall,
                             )
                             Row(
@@ -78,12 +78,20 @@ fun HistoryScreen(onBack: () -> Unit) {
                                 TripStat("Avg", formatSpeedKmh(trip.avgSpeedMps))
                                 TripStat("Top", formatSpeedKmh(trip.topSpeedMps))
                             }
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                TripStat("Max lean", formatLeanAngle(trip.maxLeanAngleDeg))
-                                TripStat("Max G", formatGForce(trip.maxGForce))
+                            // A trip only carries the readings its vehicle has;
+                            // printing "0°" for a car is worse than printing nothing.
+                            if (trip.mode.tracksMotion) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    if (trip.mode.tracksLean) {
+                                        TripStat("Max lean", formatLeanAngle(trip.maxLeanAngleDeg))
+                                    }
+                                    if (trip.mode.tracksGForce) {
+                                        TripStat("Max G", formatGForce(trip.maxGForce))
+                                    }
+                                }
                             }
                         }
                     }

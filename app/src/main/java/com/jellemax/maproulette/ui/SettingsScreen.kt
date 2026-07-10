@@ -56,6 +56,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val autoDetect by Settings.autoDetectDrives.collectAsStateWithLifecycle()
     val avoidHighways by Settings.avoidHighways.collectAsStateWithLifecycle()
     val fogRadius by Settings.fogRadiusMeters.collectAsStateWithLifecycle()
+    val shareFog by Settings.shareFog.collectAsStateWithLifecycle()
     val defaultZoom by Settings.defaultZoom.collectAsStateWithLifecycle()
     var confirmReset by remember { mutableStateOf(false) }
 
@@ -185,6 +186,30 @@ fun SettingsScreen(onBack: () -> Unit) {
                     onValueChange = { Settings.setFogRadiusMeters(it) },
                     valueRange = 100f..500f,
                 )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Share fog with friends", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Uncover the map together: your accepted friends see the " +
+                                "roads you have driven, and you see theirs. Only friends " +
+                                "who share back can see yours. Off, nobody sees either.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(
+                        checked = shareFog,
+                        onCheckedChange = {
+                            Settings.setShareFog(it)
+                            // Tell the server now: leaving it to the next trip sync
+                            // would keep serving traces after the switch went off.
+                            SyncClient.syncQuietly(context)
+                        },
+                    )
+                }
                 TextButton(onClick = { confirmReset = true }) {
                     Text("Reset explored area", color = MaterialTheme.colorScheme.error)
                 }

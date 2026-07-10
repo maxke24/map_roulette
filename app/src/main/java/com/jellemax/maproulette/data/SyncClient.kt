@@ -51,6 +51,7 @@ object SyncClient {
             .put("traces", JSONArray(TraceStore.rawLines(context)))
             .put("badges", JSONObject(BadgeStore.rawJson(context)))
             .put("stats", stats.toJson())
+            .put("shareFog", Settings.shareFog.value)
 
         val merged = Api.requestJson(context, "POST", "/sync", payload)
         val trips = merged.getJSONArray("trips")

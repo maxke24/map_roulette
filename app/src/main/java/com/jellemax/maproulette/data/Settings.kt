@@ -40,6 +40,17 @@ object Settings {
     private val _avoidHighways = MutableStateFlow(false)
     val avoidHighways: StateFlow<Boolean> = _avoidHighways
 
+    /** The mode tab the user is on. The tracking service reads it to decide
+     *  which motion sensors are worth registering, and stamps it on the trip —
+     *  including an auto-detected one, which has no other way to know. */
+    private val _tripMode = MutableStateFlow(TravelMode.CAR)
+    val tripMode: StateFlow<TravelMode> = _tripMode
+
+    /** Opt in to the shared fog of war. Off by default, and the server only
+     *  hands a friend's traces to someone who is also sharing theirs. */
+    private val _shareFog = MutableStateFlow(false)
+    val shareFog: StateFlow<Boolean> = _shareFog
+
     /** User-entered sync server URL; blank = use the baked-in default. */
     private val _syncUrl = MutableStateFlow("")
     val syncUrl: StateFlow<String> = _syncUrl
@@ -60,6 +71,8 @@ object Settings {
         }.getOrDefault(Theme.AUTO)
         _autoDetectDrives.value = prefs.getBoolean("auto_detect_drives", true)
         _avoidHighways.value = prefs.getBoolean("avoid_highways", false)
+        _tripMode.value = TravelMode.of(prefs.getString("trip_mode", null))
+        _shareFog.value = prefs.getBoolean("share_fog", false)
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
         _defaultZoom.value = prefs.getFloat("default_zoom", DEFAULT_ZOOM_DEFAULT)
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
@@ -87,6 +100,16 @@ object Settings {
     fun setAvoidHighways(value: Boolean) {
         _avoidHighways.value = value
         prefs.edit().putBoolean("avoid_highways", value).apply()
+    }
+
+    fun setTripMode(value: TravelMode) {
+        _tripMode.value = value
+        prefs.edit().putString("trip_mode", value.name).apply()
+    }
+
+    fun setShareFog(value: Boolean) {
+        _shareFog.value = value
+        prefs.edit().putBoolean("share_fog", value).apply()
     }
 
     fun setFogRadiusMeters(value: Float) {

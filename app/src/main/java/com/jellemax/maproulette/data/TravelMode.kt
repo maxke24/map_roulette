@@ -17,6 +17,11 @@ enum class TravelMode(
     val ghProfile: String,
     /** Spin produces a loop of waypoints instead of a single destination. */
     val roundTrip: Boolean = false,
+    /** Roll angle from a rigid mount. Only a leaning vehicle has one worth
+     *  recording; in a car the number is the phone sliding in its cradle. */
+    val tracksLean: Boolean = false,
+    /** Cornering and braking g. Meaningful under an engine, noise on a bicycle. */
+    val tracksGForce: Boolean = false,
 ) {
     BIKE(
         label = "Bike",
@@ -35,6 +40,8 @@ enum class TravelMode(
         gmapsMode = "d",
         ghProfile = "moto",
         roundTrip = true,
+        tracksLean = true,
+        tracksGForce = true,
     ),
     CAR(
         label = "Car",
@@ -43,5 +50,16 @@ enum class TravelMode(
             "motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$",
         gmapsMode = "d",
         ghProfile = "car",
-    ),
+        tracksGForce = true,
+    );
+
+    /** Any motion sensor at all — nothing to register for BIKE. */
+    val tracksMotion: Boolean get() = tracksLean || tracksGForce
+
+    companion object {
+        /** Tolerant of unknown names: trips saved by an older build, or a
+         *  preference written before a mode was renamed. */
+        fun of(name: String?): TravelMode =
+            entries.firstOrNull { it.name == name } ?: CAR
+    }
 }

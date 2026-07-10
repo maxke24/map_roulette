@@ -30,16 +30,21 @@ object TraceStore {
     fun loadAll(context: Context): List<List<LatLon>> {
         val f = file(context)
         if (!f.exists()) return emptyList()
-        return f.readLines().mapNotNull { line ->
-            try {
-                val arr = JSONArray(line)
-                (0 until arr.length()).map { i ->
-                    val p = arr.getJSONArray(i)
-                    LatLon(p.getDouble(0), p.getDouble(1))
-                }.takeIf { it.size >= 2 }
-            } catch (e: Exception) {
-                null
-            }
+        return parseLines(f.readLines())
+    }
+
+    /** Decodes stored JSONL polylines, skipping any line that doesn't decode.
+     *  Also used for the traces a friend's device wrote, which arrive in the
+     *  same format but have never been near this file. */
+    fun parseLines(lines: List<String>): List<List<LatLon>> = lines.mapNotNull { line ->
+        try {
+            val arr = JSONArray(line)
+            (0 until arr.length()).map { i ->
+                val p = arr.getJSONArray(i)
+                LatLon(p.getDouble(0), p.getDouble(1))
+            }.takeIf { it.size >= 2 }
+        } catch (e: Exception) {
+            null
         }
     }
 
