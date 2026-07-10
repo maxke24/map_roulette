@@ -22,32 +22,56 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       # No server URLs or Cloudflare Access credentials are built in. They would
-      # end up as plain strings in BuildConfig, and this APK is published to a
-      # public release — anyone could unzip it and read them. The app takes all
-      # four values at runtime under Settings → Server.
+      # end up as plain strings in BuildConfig, readable by anyone who unzips the
+      # APK — which outlives this repo's access controls the moment the file is
+      # handed to someone. The app takes all four values at runtime, from
+      # Settings → Routing server and Settings → Backup sync, or in one step from
+      # Settings → Server config file.
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
+      # The APK carries the version in its name, so a downloaded file still says
+      # what it is once it's sitting in a Downloads folder next to four others.
+      - name: Read version
+        id: version
+        run: |
+          name=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          code=$(grep -oP 'versionCode = \K\d+' app/build.gradle.kts)
+          test -n "$name" && test -n "$code"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk map-roulette.apk
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             map-roulette-${{ steps.version.outputs.name }}.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: map-roulette-apk
-          path: map-roulette.apk
+          name: map-roulette-apk-${{ steps.version.outputs.name }}
+          path: map-roulette-${{ steps.version.outputs.name }}.apk
 
-      - name: Update "latest" release
+      # Tagged per version, so old builds stay downloadable instead of being
+      # overwritten. Pushing twice without bumping versionName in
+      # app/build.gradle.kts replaces that version's release rather than
+      # creating a second one.
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest build
-          prerelease: true
-          files: map-roulette.apk
+          tag_name: v${{ steps.version.outputs.name }}
+          name: v${{ steps.version.outputs.name }}
+          make_latest: true
+          files: map-roulette-${{ steps.version.outputs.name }}.apk
           body: |
-            Automatic build of the newest commit on main.
-            Download `map-roulette.apk` below and install it on your phone
-            (allow installs from unknown sources).
+            Map Roulette v${{ steps.version.outputs.name }} (versionCode
+            ${{ steps.version.outputs.code }}), built from
+            ${{ github.sha }}.
+
+            Download the `.apk` below and install it on your phone (allow
+            installs from unknown sources).
 
             This build ships with no server configured. Point it at your own
-            under Settings → Server; see `server/INSTALL.md` to host one.
+            under Settings → Routing server and Settings → Backup sync, or
+            import a saved config under Settings → Server config file. See
+            `server/INSTALL.md` to host one.
