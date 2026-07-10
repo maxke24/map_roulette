@@ -56,6 +56,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val autoDetect by Settings.autoDetectDrives.collectAsStateWithLifecycle()
     val avoidHighways by Settings.avoidHighways.collectAsStateWithLifecycle()
     val fogRadius by Settings.fogRadiusMeters.collectAsStateWithLifecycle()
+    val defaultZoom by Settings.defaultZoom.collectAsStateWithLifecycle()
     var confirmReset by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -143,6 +144,30 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            SettingsSection("Map") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Default zoom", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "%.1f".format(defaultZoom),
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Slider(
+                    value = defaultZoom,
+                    onValueChange = { Settings.setDefaultZoom(it) },
+                    valueRange = Settings.DEFAULT_ZOOM_MIN..Settings.DEFAULT_ZOOM_MAX,
+                )
+                Text(
+                    "Where the map sits while following you. It zooms out up to " +
+                        "two levels at speed and back in near a turn.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
             SettingsSection("Fog of war") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -205,12 +230,20 @@ private fun SyncSection() {
     var status by remember { mutableStateOf<String?>(null) }
     var syncing by remember { mutableStateOf(false) }
 
+    val signedInAs by Settings.authUsername.collectAsStateWithLifecycle()
+
     SettingsSection("Backup sync") {
         Text(
-            "Trips and explored area are merged with your server after every " +
-                "trip and on app start, so a reinstall restores everything. " +
+            "Trips, explored area and badges are merged with your server after " +
+                "every trip and on app start, so a reinstall restores everything. " +
                 "Uses the routing server's Cloudflare Access credentials.",
             style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            if (signedInAs.isBlank()) "Not signed in — open Friends to create an account."
+            else "Signed in as $signedInAs",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Bold,
         )
         OutlinedTextField(
             value = urlField, onValueChange = { urlField = it },
@@ -228,7 +261,7 @@ private fun SyncSection() {
                 status = "Saved"
             }) { Text("Save") }
             TextButton(
-                enabled = !syncing && SyncClient.configured,
+                enabled = !syncing && SyncClient.configured && signedInAs.isNotBlank(),
                 onClick = {
                     syncing = true
                     status = "Syncing…"
@@ -236,7 +269,8 @@ private fun SyncSection() {
                         status = withContext(Dispatchers.IO) {
                             try {
                                 val r = SyncClient.sync(context)
-                                "Synced: ${r.trips} trips, ${r.traces} trace segments"
+                                "Synced: ${r.trips} trips, ${r.traces} trace segments, " +
+                                    "${r.badges} badges"
                             } catch (e: Exception) {
                                 "Sync failed: ${e.message}"
                             }

@@ -20,6 +20,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.data.Settings
+import com.jellemax.maproulette.ui.BadgesScreen
+import com.jellemax.maproulette.ui.FriendsScreen
 import com.jellemax.maproulette.ui.HistoryScreen
 import com.jellemax.maproulette.ui.MapScreen
 import com.jellemax.maproulette.ui.SettingsScreen
@@ -56,16 +58,20 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { MAP, HISTORY, SETTINGS }
+private enum class Screen { MAP, HISTORY, BADGES, FRIENDS, SETTINGS }
 
 @Composable
 private fun AppRoot() {
     var screen by remember { mutableStateOf(Screen.MAP) }
     when (screen) {
         Screen.HISTORY -> HistoryScreen(onBack = { screen = Screen.MAP })
+        Screen.BADGES -> BadgesScreen(onBack = { screen = Screen.MAP })
+        Screen.FRIENDS -> FriendsScreen(onBack = { screen = Screen.MAP })
         Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MAP })
         Screen.MAP -> MapScreen(
             onOpenHistory = { screen = Screen.HISTORY },
+            onOpenBadges = { screen = Screen.BADGES },
+            onOpenFriends = { screen = Screen.FRIENDS },
             onOpenSettings = { screen = Screen.SETTINGS },
         )
     }

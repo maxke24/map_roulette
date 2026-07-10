@@ -16,6 +16,9 @@ object Settings {
     enum class Theme { SYSTEM, LIGHT, DARK, AUTO }
 
     const val FOG_RADIUS_DEFAULT = 200f
+    const val DEFAULT_ZOOM_DEFAULT = 16f
+    const val DEFAULT_ZOOM_MIN = 12f
+    const val DEFAULT_ZOOM_MAX = 19f
 
     private lateinit var prefs: SharedPreferences
 
@@ -28,6 +31,11 @@ object Settings {
     private val _fogRadiusMeters = MutableStateFlow(FOG_RADIUS_DEFAULT)
     val fogRadiusMeters: StateFlow<Float> = _fogRadiusMeters
 
+    /** Baseline map zoom while following/navigating; speed and turn proximity
+     *  shift the camera up to two levels either side of it. */
+    private val _defaultZoom = MutableStateFlow(DEFAULT_ZOOM_DEFAULT)
+    val defaultZoom: StateFlow<Float> = _defaultZoom
+
     /** In-app navigation avoids motorways/trunks (matters for car mode). */
     private val _avoidHighways = MutableStateFlow(false)
     val avoidHighways: StateFlow<Boolean> = _avoidHighways
@@ -35,6 +43,13 @@ object Settings {
     /** User-entered sync server URL; blank = use the baked-in default. */
     private val _syncUrl = MutableStateFlow("")
     val syncUrl: StateFlow<String> = _syncUrl
+
+    /** Bearer token for the sync server; blank = signed out. App-private prefs. */
+    private val _authToken = MutableStateFlow("")
+    val authToken: StateFlow<String> = _authToken
+
+    private val _authUsername = MutableStateFlow("")
+    val authUsername: StateFlow<String> = _authUsername
 
     fun init(context: Context) {
         if (::prefs.isInitialized) return
@@ -46,7 +61,17 @@ object Settings {
         _autoDetectDrives.value = prefs.getBoolean("auto_detect_drives", true)
         _avoidHighways.value = prefs.getBoolean("avoid_highways", false)
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
+        _defaultZoom.value = prefs.getFloat("default_zoom", DEFAULT_ZOOM_DEFAULT)
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
+        _authToken.value = prefs.getString("auth_token", "") ?: ""
+        _authUsername.value = prefs.getString("auth_username", "") ?: ""
+    }
+
+    fun setAuth(token: String, username: String) {
+        _authToken.value = token
+        _authUsername.value = username
+        prefs.edit().putString("auth_token", token)
+            .putString("auth_username", username).apply()
     }
 
     fun setTheme(value: Theme) {
@@ -67,6 +92,11 @@ object Settings {
     fun setFogRadiusMeters(value: Float) {
         _fogRadiusMeters.value = value
         prefs.edit().putFloat("fog_radius_m", value).apply()
+    }
+
+    fun setDefaultZoom(value: Float) {
+        _defaultZoom.value = value
+        prefs.edit().putFloat("default_zoom", value).apply()
     }
 
     fun setSyncUrl(value: String) {

@@ -10,6 +10,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -179,49 +180,129 @@ object RoadRoulette {
         return parseWays(rawQuery(query, endpointOffset))
     }
 
+    /** Road classes a car/moto/bike can legally be on; excludes the footways,
+     *  cycleways, service roads and tracks that used to hijack the badge. */
+    private const val DRIVABLE_HIGHWAYS = "motorway|trunk|primary|secondary|tertiary|" +
+        "unclassified|residential|living_street|" +
+        "motorway_link|trunk_link|primary_link|secondary_link|tertiary_link"
+
+    /** Beyond this the road is not the one we are on, whatever Overpass returned. */
+    private const val MAX_SNAP_METERS = 25.0
+
+    /** A road counts as "the one we're on" when it runs within this many degrees
+     *  of our heading, in either direction of travel. */
+    private const val HEADING_TOLERANCE_DEG = 40.0
+
     /**
-     * Posted speed limit (km/h) of the road nearest [point], via Overpass —
-     * for the ambient speed badge while driving with no active route (which
-     * would otherwise carry this from GraphHopper's path details). Null when
-     * nothing tagged is nearby, or the tag isn't a plain number/mph value.
+     * Posted speed limit (km/h) of the road [point] is on, via Overpass — for the
+     * speed HUD while driving with no active route (which would otherwise carry
+     * this from GraphHopper's path details). Null when nothing drivable is close
+     * enough, or the tag isn't a value we can trust ("none", "signals", …).
+     *
+     * A plain nearest-way search picks up the parallel frontage road, the side
+     * street you are passing, or the motorway you are driving under, so when
+     * [headingDeg] is known a road must also run roughly along our heading;
+     * only if nothing lines up do we fall back to the closest drivable road.
      */
-    fun nearestSpeedLimitKmh(point: LatLon, radiusMeters: Double = 40.0): Double? {
-        val query = """
-            [out:json][timeout:8];
-            way(around:${radiusMeters.toInt()},${point.lat},${point.lon})["maxspeed"];
-            out tags geom;
-        """.trimIndent()
+    fun nearestSpeedLimitKmh(
+        point: LatLon,
+        headingDeg: Double? = null,
+        radiusMeters: Double = MAX_SNAP_METERS,
+    ): Double? {
+        val query = "[out:json][timeout:8];" +
+            "way(around:${radiusMeters.toInt()},${point.lat},${point.lon})" +
+            "[\"maxspeed\"][\"highway\"~\"^($DRIVABLE_HIGHWAYS)$\"];" +
+            "out tags geom;"
         val json = try {
             rawQuery(query)
         } catch (e: IOException) {
             return null
         }
         val elements = JSONObject(json).getJSONArray("elements")
-        var best: Double? = null
-        var bestDist = Double.MAX_VALUE
+
+        var aligned: Double? = null
+        var alignedDist = Double.MAX_VALUE
+        var nearest: Double? = null
+        var nearestDist = Double.MAX_VALUE
+
         for (i in 0 until elements.length()) {
             val el = elements.getJSONObject(i)
             val raw = el.optJSONObject("tags")?.optString("maxspeed")
                 ?.takeIf { it.isNotBlank() } ?: continue
             val kmh = parseMaxSpeed(raw) ?: continue
             val geometry = el.optJSONArray("geometry") ?: continue
-            for (j in 0 until geometry.length()) {
-                val p = geometry.getJSONObject(j)
-                val d = distanceMeters(point, LatLon(p.getDouble("lat"), p.getDouble("lon")))
-                if (d < bestDist) {
-                    bestDist = d
-                    best = kmh
+            for (j in 0 until geometry.length() - 1) {
+                val a = geometry.getJSONObject(j)
+                    .let { LatLon(it.getDouble("lat"), it.getDouble("lon")) }
+                val b = geometry.getJSONObject(j + 1)
+                    .let { LatLon(it.getDouble("lat"), it.getDouble("lon")) }
+                // Distance to the road itself, not to whichever node happened to
+                // be mapped: a straight way can have its nodes hundreds of metres
+                // apart and still pass right under us.
+                val d = distanceToSegmentMeters(point, a, b)
+                if (d > MAX_SNAP_METERS) continue
+                if (d < nearestDist) {
+                    nearestDist = d
+                    nearest = kmh
+                }
+                if (headingDeg != null && d < alignedDist && alignsWith(a, b, headingDeg)) {
+                    alignedDist = d
+                    aligned = kmh
                 }
             }
         }
-        return best
+        return aligned ?: nearest
     }
 
-    private fun parseMaxSpeed(raw: String): Double? {
+    /** Distance from [p] to the segment [a]→[b], on a local flat projection. */
+    fun distanceToSegmentMeters(p: LatLon, a: LatLon, b: LatLon): Double {
+        val mPerLat = 111_320.0
+        val mPerLon = mPerLat * cos(Math.toRadians(p.lat))
+        val ax = (a.lon - p.lon) * mPerLon
+        val ay = (a.lat - p.lat) * mPerLat
+        val bx = (b.lon - p.lon) * mPerLon
+        val by = (b.lat - p.lat) * mPerLat
+        val dx = bx - ax
+        val dy = by - ay
+        val len2 = dx * dx + dy * dy
+        // Project the origin (p) onto A→B, clamped to the segment.
+        val t = if (len2 == 0.0) 0.0 else (-(ax * dx + ay * dy) / len2).coerceIn(0.0, 1.0)
+        return hypot(ax + t * dx, ay + t * dy)
+    }
+
+    /** True when segment [a]→[b] runs along [headingDeg], either way round. */
+    private fun alignsWith(a: LatLon, b: LatLon, headingDeg: Double): Boolean {
+        val dLat = b.lat - a.lat
+        val dLon = (b.lon - a.lon) * cos(Math.toRadians(a.lat))
+        if (dLat == 0.0 && dLon == 0.0) return false
+        val segDeg = (Math.toDegrees(atan2(dLon, dLat)) + 360.0) % 360.0
+        var diff = abs(segDeg - headingDeg) % 360.0
+        if (diff > 180.0) diff = 360.0 - diff
+        return diff <= HEADING_TOLERANCE_DEG || diff >= 180.0 - HEADING_TOLERANCE_DEG
+    }
+
+    private val ZONE_RE = Regex("""zone:?(\d+)$""")
+
+    /**
+     * OSM `maxspeed` values that map to a definite number. Deliberately refuses
+     * anything ambiguous — showing the wrong limit is worse than showing none —
+     * so "none", "signals", "variable" and country `:rural` (80 in NL, 100 in DE)
+     * all return null.
+     */
+    internal fun parseMaxSpeed(raw: String): Double? {
         val v = raw.trim().lowercase()
-        return when {
-            v.endsWith("mph") -> v.removeSuffix("mph").trim().toDoubleOrNull()?.times(1.60934)
-            else -> v.toDoubleOrNull() // skips "walk"/"none"/"signals"/etc.
+        v.toDoubleOrNull()?.let { return it }
+        if (v.endsWith("mph")) {
+            return v.removeSuffix("mph").trim().toDoubleOrNull()?.times(1.60934)
+        }
+        if (v.endsWith("km/h") || v.endsWith("kmh")) {
+            return v.removeSuffix("km/h").removeSuffix("kmh").trim().toDoubleOrNull()
+        }
+        ZONE_RE.find(v)?.let { return it.groupValues[1].toDoubleOrNull() } // "nl:zone30"
+        return when (v.substringAfter(':', "")) {
+            "urban" -> 50.0 // 50 across the EU; the only safe implicit default
+            "living_street" -> 20.0
+            else -> null
         }
     }
 

@@ -79,22 +79,26 @@ object NavEngine {
     }
 
     /**
-     * Map camera zoom while navigating: zoomed out at speed so you see further
-     * ahead, zoomed in near a turn so the maneuver is legible.
+     * Map camera zoom while following or navigating, expressed as an offset from
+     * the user's preferred [baseZoom] (Settings > Map): out a little at speed so
+     * you see further ahead, in near a turn so the maneuver is legible. Bounded
+     * to ±2 levels so the base zoom is always what you mostly get.
+     *
+     * Pass [distanceToTurnMeters] = [Double.MAX_VALUE] when there is no route.
      */
-    fun cameraZoom(speedMps: Double, distanceToTurnMeters: Double): Double {
-        val speedZoom = when {
-            speedMps < 3.0 -> 18.0   // stopped / walking pace
-            speedMps < 8.0 -> 17.0   // city streets
-            speedMps < 14.0 -> 16.0  // arterial
-            speedMps < 22.0 -> 15.0  // fast road
-            else -> 14.0             // highway
+    fun cameraZoom(baseZoom: Double, speedMps: Double, distanceToTurnMeters: Double): Double {
+        val speedOffset = when {
+            speedMps < 3.0 -> 1.0     // stopped / walking pace
+            speedMps < 8.0 -> 0.5     // city streets
+            speedMps < 14.0 -> 0.0    // arterial
+            speedMps < 22.0 -> -0.75  // fast road
+            else -> -1.5              // highway
         }
         val turnBoost = when {
-            distanceToTurnMeters < 60.0 -> 2.0
-            distanceToTurnMeters < 150.0 -> 1.0
+            distanceToTurnMeters < 60.0 -> 1.5
+            distanceToTurnMeters < 150.0 -> 0.75
             else -> 0.0
         }
-        return min(18.0, speedZoom + turnBoost)
+        return min(20.0, max(3.0, baseZoom + (speedOffset + turnBoost).coerceIn(-2.0, 2.0)))
     }
 }

@@ -16,6 +16,7 @@ import android.location.Location
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -31,7 +32,11 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.jellemax.maproulette.MainActivity
+import com.jellemax.maproulette.data.BadgeDef
+import com.jellemax.maproulette.data.BadgeStore
+import com.jellemax.maproulette.data.Coverage
 import com.jellemax.maproulette.data.LatLon
+import com.jellemax.maproulette.data.MunicipalityStore
 import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.SyncClient
@@ -40,6 +45,9 @@ import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import kotlin.math.abs
+import kotlin.math.sqrt
 
 data class TripStats(
     val startTimeMs: Long,
@@ -64,21 +72,29 @@ data class Fix(
 )
 
 /**
- * Always-on foreground service with two modes:
+ * Always-on foreground service that scales its location appetite to what the
+ * phone is doing:
  *
- *  - Idle: low-power location updates that extend the fog-of-war trace and
- *    watch for the start of a drive (activity recognition + speed).
- *  - Trip: high-accuracy updates recording duration, distance and speed.
- *    Live stats are exposed through [stats]; when the trip ends it is
- *    written to [TripStore].
+ *  - [LocationMode.SLEEP]: activity recognition says the phone is STILL. We
+ *    ask for passive fixes only — free, but we still hear anything another app
+ *    requests, so a drive is never missed if the STILL-exit event is late.
+ *  - [LocationMode.IDLE]: moving around on foot. Coarse batched fixes extend
+ *    the fog-of-war trace and watch for a drive starting.
+ *  - [LocationMode.PROBE]: activity recognition just reported IN_VEHICLE.
+ *    Tight fixes for a few minutes to confirm (or refute) a real drive.
+ *  - [LocationMode.TRIP]: recording duration, distance, speed, lean and g-force.
+ *    Live stats go to [stats]; the finished trip is written to [TripStore].
  *
- * Trips start automatically when activity recognition reports IN_VEHICLE or
- * when speed stays above ~25 km/h (catches motorcycles, which activity
- * recognition often misclassifies). Auto-started trips end after leaving the
- * vehicle or being stationary; manually started trips keep the existing
- * End-button / back-at-origin behavior.
+ * Auto-start deliberately never trusts a single signal. IN_VEHICLE only opens a
+ * probe window, in which sustained [PROBE_SPEED_MPS] confirms a drive; with no
+ * such hint the bar is a sustained [FAST_SPEED_MPS], which catches motorcycles
+ * that activity recognition misclassifies. Either way the run must last
+ * [MIN_FAST_RUN_MS] and cover [MIN_FAST_RUN_METERS] from tight fixes only, so
+ * indoor GPS drift while you walk around the house can't fake a trip.
  */
 class TripTrackingService : Service() {
+
+    private enum class LocationMode { SLEEP, IDLE, PROBE, TRIP }
 
     companion object {
         const val EXTRA_DEST_LAT = "dest_lat"
@@ -90,11 +106,22 @@ class TripTrackingService : Service() {
         private const val NOTIFICATION_ID = 1
 
         // Auto start/stop tuning.
-        private const val FAST_SPEED_MPS = 7.0          // ~25 km/h
-        private const val FAST_FIXES_TO_START = 2
+        private const val FAST_SPEED_MPS = 7.0          // ~25 km/h, no vehicle hint
+        private const val PROBE_SPEED_MPS = 4.0         // ~14 km/h, IN_VEHICLE was seen
+        private const val FAST_FIXES_TO_START = 3
+        private const val MIN_FAST_RUN_MS = 15_000L
+        private const val MIN_FAST_RUN_METERS = 200.0
+        /** Fixes looser than this never contribute to a start decision. */
+        private const val MAX_START_ACCURACY_M = 25f
+        private const val PROBE_WINDOW_MS = 3 * 60_000L
         private const val EXIT_GRACE_MS = 2 * 60_000L   // after IN_VEHICLE exit
-        private const val STATIONARY_END_MS = 10 * 60_000L
+        private const val STATIONARY_END_MS = 5 * 60_000L
         private const val MIN_AUTO_TRIP_METERS = 500.0
+        /** Motion sensors fire ~60x/s; publish stats at 5 Hz. */
+        private const val SENSOR_EMIT_INTERVAL_MS = 200L
+        /** Floor between boundary lookups, so a drive along a coastline (where
+         *  every point misses) can't turn into a stream of Overpass queries. */
+        private const val MUNICIPALITY_LOOKUP_COOLDOWN_MS = 60_000L
 
         private val _stats = MutableStateFlow<TripStats?>(null)
         val stats: StateFlow<TripStats?> = _stats
@@ -141,21 +168,43 @@ class TripTrackingService : Service() {
     private var awayFromOrigin = false
 
     private var autoStarted = false
-    private var consecutiveFastFixes = 0
     private var pendingStopAtMs: Long? = null
     private var lastMovingMs = 0L
     private var transitionsRegistered = false
+
+    /** Activity recognition says the phone is STILL, and no trip is running. */
+    private var stationary = false
+    /** Deadline of the IN_VEHICLE confirmation window; null when not probing. */
+    private var probeUntilMs: Long? = null
+
+    // Run of consecutive fast, accurate fixes that would start a trip.
+    private var fastFixes = 0
+    private var fastRunStartMs = 0L
+    private var fastRunStart: LatLon? = null
+
     /** Which mode the active location request was made for; null = none yet. */
-    private var requestedTripMode: Boolean? = null
+    private var activeMode: LocationMode? = null
+
+    private var lastMunicipalityLookupMs = 0L
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             for (location in result.locations) onLocation(location)
+            // Batched idle fixes arrive together and a probe window can lapse
+            // between them; re-evaluate the mode once the burst is handled.
+            ensureLocationUpdates()
         }
     }
 
     private val rotationMatrix = FloatArray(9)
     private val orientationAngles = FloatArray(3)
+
+    // Written on the sensor thread, read when the trip is saved.
+    @Volatile private var currentLeanDeg = 0.0
+    @Volatile private var maxLeanDeg = 0.0
+    @Volatile private var currentG = 0.0
+    @Volatile private var maxG = 0.0
+    private var lastSensorEmitMs = 0L
 
     /**
      * Lean angle (roll, from the rotation-vector sensor) and g-force
@@ -166,26 +215,33 @@ class TripTrackingService : Service() {
      */
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
-            val stats = _stats.value ?: return
+            if (_stats.value == null) return
             when (event.sensor.type) {
                 Sensor.TYPE_ROTATION_VECTOR -> {
                     SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
                     SensorManager.getOrientation(rotationMatrix, orientationAngles)
-                    val leanDeg = Math.toDegrees(orientationAngles[2].toDouble())
-                    _stats.value = stats.copy(
-                        currentLeanAngleDeg = leanDeg,
-                        maxLeanAngleDeg = maxOf(stats.maxLeanAngleDeg, kotlin.math.abs(leanDeg)),
-                    )
+                    currentLeanDeg = Math.toDegrees(orientationAngles[2].toDouble())
+                    maxLeanDeg = maxOf(maxLeanDeg, abs(currentLeanDeg))
                 }
                 Sensor.TYPE_ACCELEROMETER -> {
                     val (x, y, z) = event.values
-                    val gForce = kotlin.math.sqrt((x * x + y * y + z * z).toDouble()) /
+                    currentG = sqrt((x * x + y * y + z * z).toDouble()) /
                         SensorManager.GRAVITY_EARTH
-                    _stats.value = stats.copy(
-                        currentGForce = gForce,
-                        maxGForce = maxOf(stats.maxGForce, gForce),
-                    )
+                    maxG = maxOf(maxG, currentG)
                 }
+            }
+            // Peaks are folded in on every event above; publishing them at 5 Hz
+            // keeps the trip card live without recomposing it 100x a second.
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastSensorEmitMs < SENSOR_EMIT_INTERVAL_MS) return
+            lastSensorEmitMs = now
+            _stats.update {
+                it?.copy(
+                    currentLeanAngleDeg = currentLeanDeg,
+                    maxLeanAngleDeg = maxLeanDeg,
+                    currentGForce = currentG,
+                    maxGForce = maxG,
+                )
             }
         }
 
@@ -195,8 +251,10 @@ class TripTrackingService : Service() {
     private fun startMotionSensors() {
         val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        rotation?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_GAME) }
-        accel?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_GAME) }
+        // SENSOR_DELAY_UI (~60ms) resolves a lean or a braking spike just as well
+        // as SENSOR_DELAY_GAME (~20ms) and wakes the CPU a third as often.
+        rotation?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI) }
+        accel?.let { sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI) }
     }
 
     private fun stopMotionSensors() {
@@ -239,14 +297,20 @@ class TripTrackingService : Service() {
         return START_STICKY
     }
 
-    private fun beginTrip(auto: Boolean) {
+    /** [startTimeMs] backdates an auto-started trip to when the drive really
+     *  began, rather than to the fix that finally proved it. */
+    private fun beginTrip(auto: Boolean, startTimeMs: Long = System.currentTimeMillis()) {
         autoStarted = auto
         origin = null
         awayFromOrigin = false
-        consecutiveFastFixes = 0
+        stationary = false
+        probeUntilMs = null
         pendingStopAtMs = null
+        resetStartDetector()
+        currentLeanDeg = 0.0; maxLeanDeg = 0.0
+        currentG = 0.0; maxG = 0.0
         lastMovingMs = System.currentTimeMillis()
-        _stats.value = TripStats(startTimeMs = System.currentTimeMillis())
+        _stats.value = TripStats(startTimeMs = startTimeMs)
         ensureLocationUpdates()
         startMotionSensors()
         updateNotification()
@@ -254,10 +318,11 @@ class TripTrackingService : Service() {
 
     private fun endTrip() {
         val stats = _stats.value ?: return
+        val wasAuto = autoStarted
         stopMotionSensors()
         flushTrace()
         val worthSaving =
-            if (autoStarted) stats.distanceMeters >= MIN_AUTO_TRIP_METERS
+            if (wasAuto) stats.distanceMeters >= MIN_AUTO_TRIP_METERS
             else stats.durationMs > 0
         if (worthSaving) {
             TripStore.save(
@@ -267,13 +332,16 @@ class TripTrackingService : Service() {
                     endTimeMs = System.currentTimeMillis(),
                     distanceMeters = stats.distanceMeters,
                     topSpeedMps = stats.topSpeedMps,
-                    maxLeanAngleDeg = stats.maxLeanAngleDeg,
-                    maxGForce = stats.maxGForce,
+                    maxLeanAngleDeg = maxLeanDeg,
+                    maxGForce = maxG,
                     destinationLat = destLat,
                     destinationLon = destLon,
                 ),
             )
             SyncClient.syncQuietly(this)
+            checkBadges()
+            // Only tell the user about trips they didn't end themselves.
+            if (wasAuto) notifyTripEnded()
         }
         _stats.value = null
         destLat = null
@@ -284,24 +352,46 @@ class TripTrackingService : Service() {
         updateNotification()
     }
 
+    private fun currentMode(): LocationMode = when {
+        _stats.value != null -> LocationMode.TRIP
+        probeUntilMs?.let { System.currentTimeMillis() < it } == true -> LocationMode.PROBE
+        stationary -> LocationMode.SLEEP
+        else -> LocationMode.IDLE
+    }
+
+    private fun locationRequest(mode: LocationMode): LocationRequest = when (mode) {
+        // Passive costs no radio time of its own: we only see fixes some other
+        // app already paid for. Enough to notice a drive if STILL-exit is late.
+        LocationMode.SLEEP ->
+            LocationRequest.Builder(Priority.PRIORITY_PASSIVE, 60_000L)
+                .setMinUpdateDistanceMeters(100f)
+                .build()
+        // Batching is the whole battery win here: the modem wakes once a minute
+        // to hand over a burst instead of every 20 s to hand over one fix.
+        LocationMode.IDLE ->
+            LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 30_000L)
+                .setMinUpdateDistanceMeters(40f)
+                .setMaxUpdateDelayMillis(60_000L)
+                .setWaitForAccurateLocation(false)
+                .build()
+        LocationMode.PROBE ->
+            LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 4_000L).build()
+        LocationMode.TRIP ->
+            LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1_000L)
+                .setMinUpdateIntervalMillis(500L)
+                .build()
+    }
+
     /** (Re)request location updates matching the current mode. */
     private fun ensureLocationUpdates() {
-        val tripMode = _stats.value != null
-        if (requestedTripMode == tripMode) return
+        val mode = currentMode()
+        if (activeMode == mode) return
         fusedClient.removeLocationUpdates(locationCallback)
-        val request =
-            if (tripMode) {
-                LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
-                    .setMinUpdateIntervalMillis(500L)
-                    .build()
-            } else {
-                LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 20_000L)
-                    .setMinUpdateDistanceMeters(30f)
-                    .build()
-            }
         try {
-            fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
-            requestedTripMode = tripMode
+            fusedClient.requestLocationUpdates(
+                locationRequest(mode), locationCallback, Looper.getMainLooper())
+            activeMode = mode
+            updateNotification()
         } catch (e: SecurityException) {
             stopSelf()
         }
@@ -315,15 +405,18 @@ class TripTrackingService : Service() {
             ) != PackageManager.PERMISSION_GRANTED
         ) return
 
+        fun transition(activity: Int, type: Int) = ActivityTransition.Builder()
+            .setActivityType(activity)
+            .setActivityTransition(type)
+            .build()
+
         val transitions = listOf(
-            ActivityTransition.Builder()
-                .setActivityType(DetectedActivity.IN_VEHICLE)
-                .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_ENTER)
-                .build(),
-            ActivityTransition.Builder()
-                .setActivityType(DetectedActivity.IN_VEHICLE)
-                .setActivityTransition(ActivityTransition.ACTIVITY_TRANSITION_EXIT)
-                .build(),
+            transition(DetectedActivity.IN_VEHICLE, ActivityTransition.ACTIVITY_TRANSITION_ENTER),
+            transition(DetectedActivity.IN_VEHICLE, ActivityTransition.ACTIVITY_TRANSITION_EXIT),
+            // STILL drives the sleep mode; WALKING cancels a stray vehicle probe.
+            transition(DetectedActivity.STILL, ActivityTransition.ACTIVITY_TRANSITION_ENTER),
+            transition(DetectedActivity.STILL, ActivityTransition.ACTIVITY_TRANSITION_EXIT),
+            transition(DetectedActivity.WALKING, ActivityTransition.ACTIVITY_TRANSITION_ENTER),
         )
         val pendingIntent = PendingIntent.getForegroundService(
             this, 1,
@@ -343,23 +436,50 @@ class TripTrackingService : Service() {
     private fun handleTransition(intent: Intent) {
         val result = ActivityTransitionResult.extractResult(intent) ?: return
         for (event in result.transitionEvents) {
-            if (event.activityType != DetectedActivity.IN_VEHICLE) continue
-            when (event.transitionType) {
-                ActivityTransition.ACTIVITY_TRANSITION_ENTER -> {
-                    pendingStopAtMs = null
-                    if (_stats.value == null && Settings.autoDetectDrives.value) {
-                        beginTrip(auto = true)
+            val entering = event.transitionType == ActivityTransition.ACTIVITY_TRANSITION_ENTER
+            when (event.activityType) {
+                DetectedActivity.STILL -> {
+                    if (_stats.value == null) stationary = entering
+                    if (entering) {
+                        resetStartDetector()
+                        flushTrace()
                     }
                 }
-                ActivityTransition.ACTIVITY_TRANSITION_EXIT -> {
-                    // Don't end immediately — could be a fuel stop. Grace
-                    // period is checked against speed in onLocation.
-                    if (_stats.value != null && autoStarted) {
-                        pendingStopAtMs = System.currentTimeMillis()
+                DetectedActivity.IN_VEHICLE -> {
+                    if (entering) {
+                        stationary = false
+                        pendingStopAtMs = null
+                        // IN_VEHICLE on its own is not evidence of a drive — it
+                        // fires for a phone on a desk next to a fan. Open a window
+                        // in which a modest sustained speed is enough to confirm.
+                        if (_stats.value == null && Settings.autoDetectDrives.value) {
+                            probeUntilMs = System.currentTimeMillis() + PROBE_WINDOW_MS
+                            resetStartDetector()
+                        }
+                    } else {
+                        probeUntilMs = null
+                        // Don't end immediately — could be a fuel stop. The grace
+                        // period is checked against speed in onTripLocation.
+                        if (_stats.value != null && autoStarted) {
+                            pendingStopAtMs = System.currentTimeMillis()
+                        }
+                    }
+                }
+                DetectedActivity.WALKING -> {
+                    if (entering && _stats.value == null) {
+                        stationary = false
+                        probeUntilMs = null // walking never becomes a drive
+                        resetStartDetector()
                     }
                 }
             }
         }
+        ensureLocationUpdates()
+    }
+
+    private fun resetStartDetector() {
+        fastFixes = 0
+        fastRunStart = null
     }
 
     private fun onLocation(location: Location) {
@@ -381,16 +501,44 @@ class TripTrackingService : Service() {
         lastLocation = location
     }
 
-    /** Idle mode: extend the explored trace, watch for a drive starting. */
+    /** Idle/probe/sleep: extend the explored trace, watch for a drive starting. */
     private fun onIdleLocation(location: Location, speed: Double) {
         if (location.accuracy <= 50f) {
             addTracePoint(LatLon(location.latitude, location.longitude))
         }
-        if (speed >= FAST_SPEED_MPS && Settings.autoDetectDrives.value) {
-            consecutiveFastFixes++
-            if (consecutiveFastFixes >= FAST_FIXES_TO_START) beginTrip(auto = true)
-        } else {
-            consecutiveFastFixes = 0
+        if (!Settings.autoDetectDrives.value) {
+            resetStartDetector()
+            return
+        }
+        // A loose fix can drift 100 m in a minute while the phone sits indoors,
+        // which reads as a comfortable 6 km/h — or, over one bad jump, as 25.
+        if (location.accuracy > MAX_START_ACCURACY_M) {
+            resetStartDetector()
+            return
+        }
+
+        val probing = probeUntilMs?.let { System.currentTimeMillis() < it } == true
+        if (speed < (if (probing) PROBE_SPEED_MPS else FAST_SPEED_MPS)) {
+            resetStartDetector()
+            return
+        }
+
+        val here = LatLon(location.latitude, location.longitude)
+        val runStart = fastRunStart
+        if (runStart == null) {
+            fastRunStart = here
+            // GPS timestamps, not wall clock: a batched burst of idle fixes all
+            // arrive at the same instant but describe minutes of driving.
+            fastRunStartMs = location.time
+            fastFixes = 1
+            return
+        }
+        fastFixes++
+        if (fastFixes >= FAST_FIXES_TO_START &&
+            location.time - fastRunStartMs >= MIN_FAST_RUN_MS &&
+            RoadRoulette.distanceMeters(runStart, here) >= MIN_FAST_RUN_METERS
+        ) {
+            beginTrip(auto = true, startTimeMs = fastRunStartMs)
         }
     }
 
@@ -418,7 +566,6 @@ class TripTrackingService : Service() {
                 if (awayFromOrigin && fromStart < 120 &&
                     now - stats.startTimeMs > 5 * 60_000
                 ) {
-                    notifyTripEnded()
                     endTrip()
                     return
                 }
@@ -432,30 +579,37 @@ class TripTrackingService : Service() {
             if (speed > 5.0) {
                 pendingStopAtMs = null
             } else if (now - exitedAt > EXIT_GRACE_MS) {
-                notifyTripEnded()
                 endTrip()
                 return
             }
         }
-        // Fallback if the vehicle-exit event never arrives.
+        // Fallback if the vehicle-exit event never arrives. Also stops the
+        // high-accuracy fixes draining the battery in a car park.
         if (autoStarted && now - lastMovingMs > STATIONARY_END_MS) {
-            notifyTripEnded()
             endTrip()
             return
         }
 
-        _stats.value = stats.copy(
-            durationMs = now - stats.startTimeMs,
-            distanceMeters = distance,
-            currentSpeedMps = speed,
-            topSpeedMps = maxOf(stats.topSpeedMps, speed),
-        )
+        // update (not value =) so the 5 Hz sensor writes aren't clobbered here.
+        _stats.update {
+            it?.copy(
+                durationMs = now - it.startTimeMs,
+                distanceMeters = distance,
+                currentSpeedMps = speed,
+                topSpeedMps = maxOf(it.topSpeedMps, speed),
+            )
+        }
     }
 
     private fun speedOf(location: Location): Double {
         if (location.hasSpeed()) return location.speed.toDouble()
-        // Coarse fixes often lack speed; derive it from the previous fix.
+        // Coarse fixes often lack speed, and deriving it from two positions is
+        // only honest when both are tight — otherwise a single indoor GPS jump
+        // between sparse idle fixes looks exactly like pulling out of a driveway.
         val last = lastLocation ?: return 0.0
+        if (location.accuracy > MAX_START_ACCURACY_M ||
+            last.accuracy > MAX_START_ACCURACY_M
+        ) return 0.0
         val dtSec = (location.time - last.time) / 1000.0
         if (dtSec !in 1.0..120.0) return 0.0
         return last.distanceTo(location) / dtSec
@@ -473,9 +627,35 @@ class TripTrackingService : Service() {
         tracePoints.add(p)
         if (tracePoints.size >= 200) flushTrace(keepLast = true)
         _liveTrace.value = tracePoints.toList()
+        maybeDiscoverMunicipality(p)
+    }
+
+    /**
+     * Learn the boundary of whatever municipality we just drove into. Points
+     * inside a boundary we already hold cost a polygon test and nothing else, so
+     * a whole ride through familiar territory makes zero network requests.
+     */
+    private fun maybeDiscoverMunicipality(p: LatLon) {
+        val now = System.currentTimeMillis()
+        if (now - lastMunicipalityLookupMs < MUNICIPALITY_LOOKUP_COOLDOWN_MS) return
+        val app = applicationContext
+        if (!MunicipalityStore.needsLookup(app, p)) return
+        lastMunicipalityLookupMs = now
+        Thread { MunicipalityStore.discoverQuietly(app, p) }.start()
+    }
+
+    /** Rescore badges off the main thread and tell the user about new ones. */
+    private fun checkBadges() {
+        val app = applicationContext
+        Thread {
+            val coverage = Coverage.compute(app)
+            val newly = BadgeStore.refresh(app, BadgeStore.stats(app, coverage)).newlyEarned
+            if (newly.isNotEmpty()) notifyBadgesEarned(newly)
+        }.start()
     }
 
     private fun flushTrace(keepLast: Boolean = false) {
+        if (tracePoints.isEmpty()) return
         TraceStore.append(this, tracePoints)
         val last = tracePoints.lastOrNull()
         tracePoints.clear()
@@ -511,6 +691,23 @@ class TripTrackingService : Service() {
         getSystemService(NotificationManager::class.java).notify(2, notification)
     }
 
+    private fun notifyBadgesEarned(badges: List<BadgeDef>) {
+        val title = if (badges.size == 1) "Badge earned!" else "${badges.size} badges earned!"
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(badges.joinToString(", ") { it.title })
+            .setSmallIcon(android.R.drawable.btn_star_big_on)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this, 0, Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE,
+                )
+            )
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(3, notification)
+    }
+
     private fun updateNotification() {
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification())
@@ -521,9 +718,11 @@ class TripTrackingService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val text =
-            if (_stats.value != null) "Tracking your drive…"
-            else "Watching for trips"
+        val text = when {
+            _stats.value != null -> "Tracking your drive…"
+            stationary -> "Standing by"
+            else -> "Watching for trips"
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Map Roulette")
             .setContentText(text)

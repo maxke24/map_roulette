@@ -28,12 +28,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Explore
@@ -41,6 +43,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationSearching
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Navigation
+import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -73,6 +76,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -81,6 +85,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -88,12 +93,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.R
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.jellemax.maproulette.data.Account
 import com.jellemax.maproulette.data.ExploredArea
 import com.jellemax.maproulette.data.GeocodeResult
 import com.jellemax.maproulette.data.Geocoder
@@ -131,6 +138,8 @@ import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
+import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.random.Random
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
@@ -157,6 +166,14 @@ private fun smoothBearing(current: Float?, target: Float, alpha: Float = 0.3f): 
     if (delta < -180f) delta += 360f
     return (current + delta * alpha + 360f) % 360f
 }
+
+// Camera easing time constants, in seconds: each frame the camera closes the
+// same fraction of its gap to the latest fix, covering ~63% of it in one tau.
+// Small enough that the map never visibly lags the road, large enough that a
+// noisy fix can't yank it.
+private const val CAM_POS_TAU = 0.35
+private const val CAM_BEARING_TAU = 0.5
+private const val CAM_ZOOM_TAU = 1.2
 
 /** One spin result awaiting a pick; [route] is null when the routing server
  *  couldn't be reached — the card then shows straight-line distance only. */
@@ -215,7 +232,12 @@ private suspend fun pickCandidate(
 }
 
 @Composable
-fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
+fun MapScreen(
+    onOpenHistory: () -> Unit,
+    onOpenBadges: () -> Unit,
+    onOpenFriends: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -250,16 +272,22 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     var navProgress by remember { mutableStateOf<NavEngine.Progress?>(null) }
     var rerouting by remember { mutableStateOf(false) }
     var lastRerouteMs by remember { mutableLongStateOf(0L) }
-    var lastCenteredPos by remember { mutableStateOf<LatLon?>(null) }
     var followMe by remember { mutableStateOf(false) }
     var settingsCollapsed by rememberSaveable { mutableStateOf(false) }
     var ambientSpeedLimitKmh by remember { mutableStateOf<Double?>(null) }
     var lastSpeedLimitQueryPos by remember { mutableStateOf<LatLon?>(null) }
     var lastSpeedLimitQueryMs by remember { mutableLongStateOf(0L) }
     var speedLimitMisses by remember { mutableIntStateOf(0) }
-    // Raw GPS bearing jitters between fixes; smoothed heading feeds mapOrientation
-    // so heading-up rotation doesn't snap every ~500ms-1s update.
-    var smoothedBearingDeg by remember { mutableStateOf<Float?>(null) }
+
+    // Where the camera is heading. GPS delivers a fix about once a second; the
+    // frame loop further down eases the map toward these targets every frame,
+    // which is what turns a sequence of jumps into a glide.
+    val defaultZoom by Settings.defaultZoom.collectAsStateWithLifecycle()
+    var camTarget by remember { mutableStateOf<LatLon?>(null) }
+    var camTargetBearing by remember { mutableStateOf<Float?>(null) }
+    var camTargetZoom by remember { mutableDoubleStateOf(defaultZoom.toDouble()) }
+    var displaySpeedKmh by remember { mutableDoubleStateOf(0.0) }
+    val cameraActive = followMe || navigating
 
     LaunchedEffect(liveFix) {
         liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
@@ -275,12 +303,12 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     // Pull from the sync server on launch: restores everything after a
     // reinstall and picks up trips recorded while the app was closed.
     LaunchedEffect(Unit) {
-        if (SyncClient.configured) {
+        if (SyncClient.configured && Account.signedIn) {
             withContext(Dispatchers.IO) {
                 try {
                     SyncClient.sync(context)
                 } catch (e: Exception) {
-                    // offline or server down; next launch catches up
+                    // offline, server down, or signed out; next launch catches up
                 }
             }
         }
@@ -310,6 +338,16 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             controller.setZoom(6.0)
         }
     }
+    // Kept across overlay rebuilds: while the camera is active the frame loop
+    // moves this marker in step with the map, so the dot doesn't hop once a
+    // second against a map that is gliding.
+    val positionMarker = remember {
+        Marker(mapView).apply {
+            icon = ContextCompat.getDrawable(context, R.drawable.ic_map_dot)
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            title = "You are here"
+        }
+    }
     LaunchedEffect(tileSource) { mapView.setTileSource(tileSource) }
     DisposableEffect(Unit) {
         mapView.onResume()
@@ -330,7 +368,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     ?: client.lastLocation.await()
                 if (loc != null) {
                     myLocation = LatLon(loc.latitude, loc.longitude)
-                    mapView.controller.setZoom(12.0)
+                    mapView.controller.setZoom(Settings.defaultZoom.value.toDouble())
                     mapView.controller.setCenter(GeoPoint(loc.latitude, loc.longitude))
                 } else {
                     error = "Could not get location; is GPS on?"
@@ -392,7 +430,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
 
     // Redraw overlays whenever location, radius, destination, or route changes.
     LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
-        fogEnabled, fogRadius, traces, liveTrace, navigating) {
+        fogEnabled, fogRadius, traces, liveTrace, navigating, cameraActive) {
         mapView.overlays.clear()
         if (!navigating) {
             // Long-press drops a destination pin anywhere.
@@ -444,12 +482,9 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     })
                 }
             }
-            mapView.overlays.add(Marker(mapView).apply {
-                position = center
-                icon = ContextCompat.getDrawable(context, R.drawable.ic_map_dot)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                title = "You are here"
-            })
+            // While following, the frame loop owns the marker position.
+            if (!cameraActive) positionMarker.position = center
+            mapView.overlays.add(positionMarker)
         }
         val dest = destination
         if (dest != null) {
@@ -483,9 +518,7 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
     fun stopNavigation() {
         navigating = false
         navProgress = null
-        mapView.mapOrientation = 0f
-        smoothedBearingDeg = null
-        mapView.invalidate()
+        camTargetBearing = null
         NavRelay.clear(context)
     }
 
@@ -524,13 +557,13 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         }
     }
 
-    // Ambient speed-limit badge while just driving (not navigating): throttled
+    // Ambient speed-limit sign while just driving (not navigating): throttled
     // so we don't hammer Overpass every GPS fix — requery only after moving
-    // ~150m or 20s, matching NavEngine's own speedLimitKmh via GraphHopper.
+    // ~250m or 25s, matching NavEngine's own speedLimitKmh via GraphHopper.
     // Keyed on `navigating` only (not `liveFix`) and collecting the fix flow
     // ourselves: keying on liveFix restarted this effect on every GPS update
     // (every ~0.5-1s), which cancelled the in-flight Overpass request before
-    // a slower mirror could ever answer — the badge could go stale for as
+    // a slower mirror could ever answer — the sign could go stale for as
     // long as the network round-trip kept losing that race.
     LaunchedEffect(navigating) {
         if (navigating) return@LaunchedEffect
@@ -541,10 +574,14 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
             val moved = lastSpeedLimitQueryPos?.let { RoadRoulette.distanceMeters(it, pos) }
                 ?: Double.MAX_VALUE
             val now = System.currentTimeMillis()
-            if (moved < 150.0 && now - lastSpeedLimitQueryMs < 20_000) return@collect
+            if (moved < 250.0 && now - lastSpeedLimitQueryMs < 25_000) return@collect
             lastSpeedLimitQueryPos = pos
             lastSpeedLimitQueryMs = now
-            val result = withContext(Dispatchers.IO) { RoadRoulette.nearestSpeedLimitKmh(pos) }
+            // Heading lets the lookup reject the cross street and the frontage
+            // road, which is most of why the sign used to show nonsense.
+            val result = withContext(Dispatchers.IO) {
+                RoadRoulette.nearestSpeedLimitKmh(pos, fix.bearingDeg?.toDouble())
+            }
             if (result != null) {
                 ambientSpeedLimitKmh = result
                 speedLimitMisses = 0
@@ -557,25 +594,68 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         }
     }
 
-    // Recenter on the rider while driving with no destination set — same jitter
-    // guard as turn-by-turn, but no route progress/reroute logic.
-    LaunchedEffect(followMe, navigating, liveFix) {
-        if (!followMe || navigating) return@LaunchedEffect
+    // Each fix only moves the targets; nothing touches the map here. This is
+    // what lets the camera loop below run uninterrupted — the old code drove
+    // animateTo() from an effect keyed on liveFix, so every fix cancelled the
+    // previous 350ms flight partway through and the map lurched.
+    LaunchedEffect(liveFix, defaultZoom) {
         val fix = liveFix ?: return@LaunchedEffect
-        val pos = LatLon(fix.lat, fix.lon)
-        val moved = lastCenteredPos?.let { RoadRoulette.distanceMeters(it, pos) } ?: Double.MAX_VALUE
-        if (moved > 3.0) {
-            mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), mapView.zoomLevelDouble.coerceAtLeast(15.0), 350L)
-            lastCenteredPos = pos
+        camTarget = LatLon(fix.lat, fix.lon)
+        if (fix.bearingDeg != null && fix.speedMps > 2.0) camTargetBearing = fix.bearingDeg
+        camTargetZoom = NavEngine.cameraZoom(
+            defaultZoom.toDouble(),
+            fix.speedMps,
+            navProgress?.distanceToTurnMeters ?: Double.MAX_VALUE,
+        )
+        displaySpeedKmh += (fix.speedMps * 3.6 - displaySpeedKmh) * 0.4
+    }
+
+    // The camera itself: one loop, one frame at a time, easing toward whatever
+    // the last fix asked for. Compose only produces frames while the activity is
+    // resumed, so this costs nothing with the screen off.
+    // `haveFix` is a key so that turning follow on before the first fix arrives
+    // still starts the loop once it does, instead of leaving it returned-out.
+    val haveFix = camTarget != null || myLocation != null
+    LaunchedEffect(cameraActive, haveFix) {
+        if (!cameraActive) {
+            mapView.setMapOrientation(0f, false)
+            mapView.invalidate()
+            return@LaunchedEffect
         }
-        if (fix.bearingDeg != null && fix.speedMps > 2.0) {
-            val smoothed = smoothBearing(smoothedBearingDeg, fix.bearingDeg)
-            smoothedBearingDeg = smoothed
-            mapView.mapOrientation = -smoothed
+        val start = camTarget ?: myLocation ?: return@LaunchedEffect
+        var lat = start.lat
+        var lon = start.lon
+        var bearing = camTargetBearing ?: 0f
+        var zoom = mapView.zoomLevelDouble
+        var lastNs = withFrameNanos { it }
+        while (true) {
+            val ns = withFrameNanos { it }
+            // Clamp dt so a dropped frame or a stalled render doesn't teleport us.
+            val dt = ((ns - lastNs) / 1_000_000_000.0).coerceIn(0.0, 0.1)
+            lastNs = ns
+
+            camTarget?.let { target ->
+                val a = 1.0 - exp(-dt / CAM_POS_TAU)
+                lat += (target.lat - lat) * a
+                lon += (target.lon - lon) * a
+            }
+            camTargetBearing?.let { target ->
+                bearing = smoothBearing(
+                    bearing, target, (1.0 - exp(-dt / CAM_BEARING_TAU)).toFloat())
+            }
+            zoom += (camTargetZoom - zoom) * (1.0 - exp(-dt / CAM_ZOOM_TAU))
+
+            // Heading-up while moving; osmdroid rotates counterclockwise. Skip its
+            // redraw — setCenter below invalidates once for all three changes.
+            mapView.setMapOrientation(-bearing, false)
+            if (abs(zoom - mapView.zoomLevelDouble) > 0.005) mapView.controller.setZoom(zoom)
+            val here = GeoPoint(lat, lon)
+            positionMarker.position = here
+            mapView.controller.setCenter(here)
         }
     }
 
-    // Follow the route while navigating: progress, camera, arrival, reroute.
+    // Follow the route while navigating: progress, arrival, reroute.
     LaunchedEffect(navigating, liveFix, route) {
         if (!navigating) return@LaunchedEffect
         val fix = liveFix ?: return@LaunchedEffect
@@ -584,23 +664,6 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
         val progress = NavEngine.progress(r, pos) ?: return@LaunchedEffect
         navProgress = progress
         NavRelay.send(context, progress, currentSpeedKmh = fix.speedMps * 3.6)
-
-        // GPS fixes can arrive faster than a full-length animation completes (min
-        // interval 500ms vs the old 800ms flight), which restarted the animation
-        // mid-flight and looked choppy. A shorter flight avoids the overlap, and
-        // skipping sub-3m moves ignores GPS jitter while stopped at a light.
-        val moved = lastCenteredPos?.let { RoadRoulette.distanceMeters(it, pos) } ?: Double.MAX_VALUE
-        if (moved > 3.0) {
-            val zoom = NavEngine.cameraZoom(fix.speedMps, progress.distanceToTurnMeters)
-            mapView.controller.animateTo(GeoPoint(pos.lat, pos.lon), zoom, 350L)
-            lastCenteredPos = pos
-        }
-        if (fix.bearingDeg != null && fix.speedMps > 2.0) {
-            // Heading-up while moving; osmdroid rotates counterclockwise.
-            val smoothed = smoothBearing(smoothedBearingDeg, fix.bearingDeg)
-            smoothedBearingDeg = smoothed
-            mapView.mapOrientation = -smoothed
-        }
 
         // Arrived (point-to-point; loops end back at the start on their own).
         if (destination != null && progress.remainingMeters < 40 &&
@@ -751,16 +814,6 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                     .padding(12.dp),
             )
         } else {
-            liveFix?.takeIf { it.speedMps >= 2.0 }?.let { fix ->
-                AmbientSpeedBadge(
-                    speedKmh = fix.speedMps * 3.6,
-                    limitKmh = ambientSpeedLimitKmh,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .statusBarsPadding()
-                        .padding(16.dp),
-                )
-            }
             Column(
                 Modifier
                     .align(Alignment.TopEnd)
@@ -780,6 +833,12 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                 }
                 SmallFloatingActionButton(onClick = onOpenHistory) {
                     Icon(Icons.Default.History, contentDescription = "Trip history")
+                }
+                SmallFloatingActionButton(onClick = onOpenBadges) {
+                    Icon(Icons.Default.EmojiEvents, contentDescription = "Badges")
+                }
+                SmallFloatingActionButton(onClick = onOpenFriends) {
+                    Icon(Icons.Default.People, contentDescription = "Friends")
                 }
                 SmallFloatingActionButton(onClick = onOpenSettings) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -801,6 +860,16 @@ fun MapScreen(onOpenHistory: () -> Unit, onOpenSettings: () -> Unit) {
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Above everything else and centred: this is the number you glance at.
+            liveFix?.takeIf { it.speedMps >= 1.4 }?.let {
+                SpeedHud(
+                    speedKmh = displaySpeedKmh,
+                    limitKmh = if (navigating) navProgress?.speedLimitKmh
+                        else ambientSpeedLimitKmh,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                )
+            }
+
             stats?.let { ActiveTripCard(it) }
 
             if (navigating) NavigationBottomBar(
@@ -1273,34 +1342,48 @@ private fun CollapsedSettingsBar(
     }
 }
 
-/** Current-speed readout with a color cue against the nearest road's posted
- *  limit, shown while driving without an active route (mirrors the watch's
- *  color-cue treatment instead of duplicating the nav banner's full sign). */
+/** Current speed, large and centred, next to the posted limit for the road
+ *  we're on. Used both while cruising and while navigating; the whole dial
+ *  turns red once we're more than 5 km/h over. */
 @Composable
-private fun AmbientSpeedBadge(speedKmh: Double, limitKmh: Double?, modifier: Modifier = Modifier) {
-    val speeding = limitKmh?.let { speedKmh > it + 5 } ?: false
-    Card(
-        modifier = modifier,
-        shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ),
+private fun SpeedHud(speedKmh: Double, limitKmh: Double?, modifier: Modifier = Modifier) {
+    val speeding = limitKmh != null && speedKmh > limitKmh + 5
+    Row(
+        modifier,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Card(
+            shape = CircleShape,
+            colors = CardDefaults.cardColors(
+                containerColor = if (speeding) MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
         ) {
-            Crossfade(targetState = limitKmh, animationSpec = tween(300), label = "speedLimit") {
-                SpeedLimitSign(it)
+            Column(
+                Modifier.size(112.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "%.0f".format(speedKmh),
+                    fontSize = 46.sp,
+                    lineHeight = 48.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (speeding) MaterialTheme.colorScheme.onErrorContainer
+                        else MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    "km/h",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (speeding) MaterialTheme.colorScheme.onErrorContainer
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Text(
-                "%.0f".format(speedKmh),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = if (speeding) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurface,
-            )
+        }
+        Crossfade(targetState = limitKmh, animationSpec = tween(300), label = "speedLimit") {
+            SpeedLimitSign(it, size = 72.dp)
         }
     }
 }

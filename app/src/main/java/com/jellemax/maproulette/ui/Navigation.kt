@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jellemax.maproulette.data.NavEngine
@@ -83,7 +84,7 @@ fun NavigationBanner(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SpeedLimitSign(progress?.speedLimitKmh)
+            // The speed limit lives on the speed HUD; showing it twice was noise.
             val instruction = progress?.nextInstruction
             Icon(
                 signIcon(instruction?.sign ?: 0),
@@ -161,21 +162,21 @@ private fun eta(remainingMs: Long): String =
 
 /** EU-style round speed limit sign: white disc, thick red ring, big black number. */
 @Composable
-fun SpeedLimitSign(kmh: Double?, modifier: Modifier = Modifier) {
+fun SpeedLimitSign(kmh: Double?, size: Dp = 64.dp, modifier: Modifier = Modifier) {
     if (kmh == null) return
     Box(
         modifier
-            .size(64.dp)
+            .size(size)
             .clip(CircleShape)
             .background(Color.White)
-            .border(BorderStroke(5.dp, Color(0xFFD32F2F)), CircleShape),
+            .border(BorderStroke(size * 0.08f, Color(0xFFD32F2F)), CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             kmh.toInt().toString(),
             color = Color.Black,
             fontWeight = FontWeight.Black,
-            fontSize = 24.sp,
+            fontSize = (size.value * 0.38f).sp,
             textAlign = TextAlign.Center,
         )
     }
