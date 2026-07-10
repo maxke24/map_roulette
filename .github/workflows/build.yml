@@ -21,12 +21,12 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # No server URLs or Cloudflare Access credentials are built in. They would
+      # end up as plain strings in BuildConfig, and this APK is published to a
+      # public release — anyone could unzip it and read them. The app takes all
+      # four values at runtime under Settings → Server.
       - name: Build debug APK
         run: ./gradlew assembleDebug
-        env:
-          ROUTING_SERVER_URL: ${{ secrets.ROUTING_SERVER_URL }}
-          ROUTING_CF_ID: ${{ secrets.ROUTING_CF_ID }}
-          ROUTING_CF_SECRET: ${{ secrets.ROUTING_CF_SECRET }}
 
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk map-roulette.apk
@@ -48,3 +48,6 @@ jobs:
             Automatic build of the newest commit on main.
             Download `map-roulette.apk` below and install it on your phone
             (allow installs from unknown sources).
+
+            This build ships with no server configured. Point it at your own
+            under Settings → Server; see `server/INSTALL.md` to host one.
