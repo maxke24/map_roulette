@@ -31,6 +31,11 @@ object Settings {
     private val _fogRadiusMeters = MutableStateFlow(FOG_RADIUS_DEFAULT)
     val fogRadiusMeters: StateFlow<Float> = _fogRadiusMeters
 
+    /** Draw the fog of war over the map. On by default; the map toolbar's eye
+     *  toggles it, and the choice sticks across launches. */
+    private val _fogEnabled = MutableStateFlow(true)
+    val fogEnabled: StateFlow<Boolean> = _fogEnabled
+
     /** Baseline map zoom while following/navigating; speed and turn proximity
      *  shift the camera up to two levels either side of it. */
     private val _defaultZoom = MutableStateFlow(DEFAULT_ZOOM_DEFAULT)
@@ -73,6 +78,7 @@ object Settings {
         _avoidHighways.value = prefs.getBoolean("avoid_highways", false)
         _tripMode.value = TravelMode.of(prefs.getString("trip_mode", null))
         _shareFog.value = prefs.getBoolean("share_fog", false)
+        _fogEnabled.value = prefs.getBoolean("fog_enabled", true)
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
         _defaultZoom.value = prefs.getFloat("default_zoom", DEFAULT_ZOOM_DEFAULT)
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
@@ -110,6 +116,11 @@ object Settings {
     fun setShareFog(value: Boolean) {
         _shareFog.value = value
         prefs.edit().putBoolean("share_fog", value).apply()
+    }
+
+    fun setFogEnabled(value: Boolean) {
+        _fogEnabled.value = value
+        prefs.edit().putBoolean("fog_enabled", value).apply()
     }
 
     fun setFogRadiusMeters(value: Float) {

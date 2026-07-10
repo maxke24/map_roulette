@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spin candidate marker. Single tintable path with an even-odd hole for the
+     core, so each option can be tinted its own color and still read as a ring. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="40dp"
+    android:height="40dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FF000000">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,1.5C7.85,1.5 4.5,4.85 4.5,9c0,5.6 7.5,13.5 7.5,13.5S19.5,14.6 19.5,9C19.5,4.85 16.15,1.5 12,1.5z M12,12.4a3.4,3.4 0 1,1 0,-6.8a3.4,3.4 0 1,1 0,6.8z" />
+</vector>

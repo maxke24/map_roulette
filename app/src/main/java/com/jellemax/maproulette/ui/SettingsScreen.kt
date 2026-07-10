@@ -1,5 +1,7 @@
 package com.jellemax.maproulette.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.BuildConfig
+import com.jellemax.maproulette.data.ConfigFile
 import com.jellemax.maproulette.data.RoutingServer
 import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.Settings
@@ -219,6 +222,8 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             SyncSection()
 
+            ConfigFileSection()
+
             Text(
                 "Map Roulette v${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodySmall,
@@ -304,6 +309,68 @@ private fun SyncSection() {
                     }
                 },
             ) { Text("Sync now") }
+        }
+        status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    }
+}
+
+/**
+ * Server settings to and from a file the user keeps outside the app.
+ * Preferences die with an uninstall and the baked-in defaults only exist in
+ * APKs built from a local.properties; this is what makes a reinstall a two-tap
+ * restore instead of retyping a URL and two Cloudflare secrets.
+ */
+@Composable
+private fun ConfigFileSection() {
+    val context = LocalContext.current
+    var status by remember { mutableStateOf<String?>(null) }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(ConfigFile.MIME_TYPE)
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        status = try {
+            ConfigFile.export(context, uri)
+            "Config exported"
+        } catch (e: Exception) {
+            "Export failed: ${e.message}"
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        status = try {
+            ConfigFile.import(context, uri)
+            "Config imported — restart the app to use the new servers"
+        } catch (e: Exception) {
+            "Import failed: ${e.message}"
+        }
+    }
+
+    SettingsSection("Server config file") {
+        Text(
+            "Save the routing server, its Cloudflare credentials, the sync " +
+                "server and your sign-in to a file. After a reinstall, import " +
+                "it instead of typing everything again.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            "The file contains your sign-in token. Keep it somewhere private — " +
+                "anyone holding it is signed in as you.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = {
+                status = null
+                exportLauncher.launch(ConfigFile.SUGGESTED_NAME)
+            }) { Text("Export config") }
+            TextButton(onClick = {
+                status = null
+                // Some file pickers hide application/json; */* keeps the file reachable.
+                importLauncher.launch(arrayOf(ConfigFile.MIME_TYPE, "*/*"))
+            }) { Text("Import config") }
         }
         status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }

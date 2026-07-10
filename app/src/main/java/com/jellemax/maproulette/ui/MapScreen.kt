@@ -10,10 +10,13 @@ import android.graphics.Paint as AndroidPaint
 import java.io.IOException
 import android.net.Uri
 import android.os.Build
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -91,6 +94,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -179,6 +183,19 @@ private const val CAM_POS_TAU = 0.35
 private const val CAM_BEARING_TAU = 0.5
 private const val CAM_ZOOM_TAU = 1.2
 
+// Panning or pinching parks the camera instead of forcing you to hunt for the
+// follow button. Driving off takes it back: above this speed, this long after
+// you last touched the map. The quiet period is what stops a two-finger zoom at
+// 80 km/h from being yanked out from under you mid-gesture.
+private const val CAM_RESUME_SPEED_MPS = 3.0
+private const val CAM_RESUME_QUIET_MS = 8_000L
+
+/** One color per spin candidate, so the pin on the map and the row in the card
+ *  are recognizably the same place. Kept clear of the blue radius circle, the
+ *  orange direction wedge and the pink route line. */
+private val CANDIDATE_COLORS = listOf(0xFF7E57C2, 0xFF00897B, 0xFFF4511E)
+    .map { it.toInt() }
+
 /** One spin result awaiting a pick; [route] is null when the routing server
  *  couldn't be reached — the card then shows straight-line distance only. */
 private data class RouteCandidate(
@@ -261,7 +278,7 @@ fun MapScreen(
     var poiKind by rememberSaveable { mutableStateOf(PoiKind.ROAD) }
     var directionDeg by rememberSaveable { mutableStateOf<Float?>(null) }
     var destinationName by remember { mutableStateOf<String?>(null) }
-    var fogEnabled by rememberSaveable { mutableStateOf(false) }
+    val fogEnabled by Settings.fogEnabled.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     // Stored traces reload on every store write; the live trace and fix come
     // straight from the tracking service, so fog and position update in real
@@ -285,7 +302,12 @@ fun MapScreen(
     var navProgress by remember { mutableStateOf<NavEngine.Progress?>(null) }
     var rerouting by remember { mutableStateOf(false) }
     var lastRerouteMs by remember { mutableLongStateOf(0L) }
-    var followMe by remember { mutableStateOf(false) }
+    // Following is the resting state of the map. `camSuspended` is what a pan,
+    // a pinch or a spin result sets so you can look around; it does not switch
+    // following off, it parks it until you are moving again.
+    var followMe by remember { mutableStateOf(true) }
+    var camSuspended by remember { mutableStateOf(false) }
+    var lastGestureMs by remember { mutableLongStateOf(0L) }
     var settingsCollapsed by rememberSaveable { mutableStateOf(false) }
     var ambientSpeedLimitKmh by remember { mutableStateOf<Double?>(null) }
     var lastSpeedLimitQueryPos by remember { mutableStateOf<LatLon?>(null) }
@@ -300,7 +322,9 @@ fun MapScreen(
     var camTargetBearing by remember { mutableStateOf<Float?>(null) }
     var camTargetZoom by remember { mutableDoubleStateOf(defaultZoom.toDouble()) }
     var displaySpeedKmh by remember { mutableDoubleStateOf(0.0) }
-    val cameraActive = followMe || navigating
+    val cameraActive = (followMe || navigating) && !camSuspended
+    // What the follow button reflects: navigation drives the camera on its own.
+    val following = followMe && !camSuspended
 
     LaunchedEffect(liveFix) {
         liveFix?.takeIf { it.accuracyMeters <= 100f }?.let {
@@ -377,6 +401,52 @@ fun MapScreen(
         }
     }
 
+    // Park the camera as soon as the map is dragged or pinched. osmdroid's own
+    // MapListener can't be used for this: the frame loop calls setCenter every
+    // frame, so it fires constantly and can't tell us apart from the user.
+    // The listener returns false, leaving MapView to handle the gesture itself.
+    DisposableEffect(mapView) {
+        val slop = ViewConfiguration.get(context).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        mapView.setOnTouchListener { _, event ->
+            fun park() {
+                camSuspended = true
+                lastGestureMs = System.currentTimeMillis()
+            }
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                }
+                // Second finger down is a pinch starting; no slop test needed.
+                MotionEvent.ACTION_POINTER_DOWN -> park()
+                MotionEvent.ACTION_MOVE ->
+                    if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) park()
+                // A tap that never left the slop circle keeps following: it was
+                // a long-press pin drop or a marker tap, not a pan.
+                MotionEvent.ACTION_UP -> if (camSuspended) lastGestureMs = System.currentTimeMillis()
+            }
+            false
+        }
+        onDispose { mapView.setOnTouchListener(null) }
+    }
+
+    // Driving off takes the camera back. Not while a spin is on screen: the
+    // candidates are the whole reason the map is parked where it is, and a
+    // passenger spinning at speed would otherwise never get to read them.
+    LaunchedEffect(camSuspended, spinning, candidates.isEmpty()) {
+        if (!camSuspended || spinning || candidates.isNotEmpty()) return@LaunchedEffect
+        TripTrackingService.lastFix.collect { fix ->
+            fix ?: return@collect
+            if (fix.speedMps >= CAM_RESUME_SPEED_MPS &&
+                System.currentTimeMillis() - lastGestureMs > CAM_RESUME_QUIET_MS
+            ) {
+                camSuspended = false
+            }
+        }
+    }
+
     fun fetchLocation() {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
@@ -448,9 +518,30 @@ fun MapScreen(
         }
     }
 
+    /** Commit to one spin candidate and frame the trip to it. */
+    fun choose(c: RouteCandidate) {
+        destination = c.destination
+        destinationName = c.name
+        route = c.route
+        candidates = emptyList()
+        val loc = myLocation ?: return
+        camSuspended = true
+        // Buy the same grace period a pan gets, so a pick made at speed isn't
+        // re-centered before you've seen the route you just chose.
+        lastGestureMs = System.currentTimeMillis()
+        mapView.zoomToBoundingBox(
+            BoundingBox.fromGeoPoints(
+                listOf(GeoPoint(loc.lat, loc.lon),
+                    GeoPoint(c.destination.lat, c.destination.lon))
+            ).increaseByScale(1.4f),
+            true,
+        )
+    }
+
     // Redraw overlays whenever location, radius, destination, or route changes.
     LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
-        fogEnabled, fogRadius, traces, friendTraces, liveTrace, navigating, cameraActive) {
+        fogEnabled, fogRadius, traces, friendTraces, liveTrace, navigating, cameraActive,
+        candidates) {
         mapView.overlays.clear()
         if (!navigating) {
             // Long-press drops a destination pin anywhere.
@@ -507,6 +598,19 @@ fun MapScreen(
             if (!cameraActive) positionMarker.position = center
             mapView.overlays.add(positionMarker)
         }
+        // Spin results are pins before they are a list: you pick where you are
+        // going by looking at it. Color matches the row in the card, and tapping
+        // the pin commits to it just as tapping the row does.
+        candidates.forEachIndexed { index, c ->
+            mapView.overlays.add(Marker(mapView).apply {
+                position = GeoPoint(c.destination.lat, c.destination.lon)
+                icon = ContextCompat.getDrawable(context, R.drawable.ic_map_candidate_pin)
+                    ?.mutate()?.apply { setTint(CANDIDATE_COLORS[index % CANDIDATE_COLORS.size]) }
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                title = c.name ?: "Option ${index + 1}"
+                setOnMarkerClickListener { _, _ -> choose(c); true }
+            })
+        }
         val dest = destination
         if (dest != null) {
             mapView.overlays.add(Marker(mapView).apply {
@@ -548,6 +652,7 @@ fun MapScreen(
             error = "Waiting for your location…"
             return
         }
+        camSuspended = false
         if (stats == null) {
             TripTrackingService.start(context, destination?.lat, destination?.lon)
         }
@@ -728,6 +833,9 @@ fun MapScreen(
         spinJob = scope.launch {
             spinning = true
             error = null
+            // The result gets framed on the map; a following camera would drag
+            // it straight back to you before you could look at it.
+            camSuspended = true
             var serverError: String? = null
             try {
                 // Bias destinations toward territory the fog hasn't uncovered.
@@ -858,11 +966,14 @@ fun MapScreen(
                 )
             } else {
                 MapToolbar(
-                    followMe = followMe,
+                    followMe = following,
                     fogEnabled = fogEnabled,
-                    onToggleFollow = { followMe = !followMe },
+                    onToggleFollow = {
+                        if (following) followMe = false
+                        else { followMe = true; camSuspended = false }
+                    },
                     onSearch = { searchOpen = true },
-                    onToggleFog = { fogEnabled = !fogEnabled },
+                    onToggleFog = { Settings.setFogEnabled(!fogEnabled) },
                     onOpenHistory = onOpenHistory,
                     onOpenBadges = onOpenBadges,
                     onOpenFriends = onOpenFriends,
@@ -912,22 +1023,7 @@ fun MapScreen(
                     onExit = { stopNavigation() },
                 ) else if (candidates.isNotEmpty()) CandidatesCard(
                     candidates = candidates,
-                    onPick = { c ->
-                        destination = c.destination
-                        destinationName = c.name
-                        route = c.route
-                        candidates = emptyList()
-                        val loc = myLocation
-                        if (loc != null) {
-                            mapView.zoomToBoundingBox(
-                                BoundingBox.fromGeoPoints(
-                                    listOf(GeoPoint(loc.lat, loc.lon),
-                                        GeoPoint(c.destination.lat, c.destination.lon))
-                                ).increaseByScale(1.4f),
-                                true,
-                            )
-                        }
-                    },
+                    onPick = ::choose,
                     onReroll = { candidates = emptyList(); spin() },
                     onCancel = { candidates = emptyList() },
                 ) else if (settingsCollapsed) CollapsedSpinBar(
@@ -1108,6 +1204,8 @@ fun MapScreen(
                 destination = r.location
                 destinationName = r.name
                 route = null
+                camSuspended = true
+                lastGestureMs = System.currentTimeMillis()
                 mapView.controller.animateTo(
                     GeoPoint(r.location.lat, r.location.lon), 14.0, 800L)
             },
@@ -1273,16 +1371,29 @@ private fun CandidatesCard(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Pick a destination", style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold)
+            Text(
+                "All three are on the map — tap a pin or a row.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             candidates.forEachIndexed { index, c ->
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .clickable { onPick(c) }
                         .padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column {
+                    Box(
+                        Modifier
+                            .size(14.dp)
+                            .background(
+                                Color(CANDIDATE_COLORS[index % CANDIDATE_COLORS.size]),
+                                CircleShape,
+                            )
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
                         Text(
                             c.name ?: "Option ${index + 1}",
                             style = MaterialTheme.typography.bodyLarge,
