@@ -4,3 +4,7 @@ local.properties
 .idea/
 *.iml
 .kotlin/
+
+# Python bytecode from the sync server
+__pycache__/
+*.pyc
