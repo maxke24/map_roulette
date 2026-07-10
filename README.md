@@ -31,3 +31,17 @@ fused location provider. Trips stored as JSON in app-private storage. Min SDK 26
 
 APK lands in `app/build/outputs/apk/debug/app-debug.apk`. Install with
 `adb install app/build/outputs/apk/debug/app-debug.apk`.
+
+## Self-hosting the server
+
+The app can sync to your own server (accounts, trips, fog of war, friends) and
+route against your own GraphHopper instance. One script installs either or both
+— on a Proxmox host it builds an LXC for you, anywhere else it installs in place.
+
+```
+bash server/install.sh
+```
+
+See [`server/INSTALL.md`](server/INSTALL.md) for exposing it safely, choosing an
+OSM region, backups, and the API. Verify a running install with
+`bash server/verify.sh`.
