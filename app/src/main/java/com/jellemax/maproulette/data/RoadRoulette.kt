@@ -254,6 +254,84 @@ object RoadRoulette {
         return aligned ?: nearest
     }
 
+    /** A drivable way with a known posted limit, for local speed-limit snapping. */
+    data class SpeedLimitWay(val kmh: Double, val points: List<LatLon>)
+
+    /** Radius fetched around you for ambient speed-limit snapping. Big enough
+     *  that a single fetch covers a few minutes of city driving. */
+    const val SPEED_PREFETCH_RADIUS_M = 1500.0
+
+    /**
+     * Every drivable way with a parseable `maxspeed` within [radiusMeters] of
+     * [center]. Fetched once for an area, then handed to [snapSpeedLimitKmh]
+     * per GPS fix so the posted sign changes the instant you cross onto a new
+     * road — no network round-trip in the loop. Empty on any network error.
+     */
+    fun speedLimitWays(
+        center: LatLon,
+        radiusMeters: Double = SPEED_PREFETCH_RADIUS_M,
+    ): List<SpeedLimitWay> {
+        val query = "[out:json][timeout:15];" +
+            "way(around:${radiusMeters.toInt()},${center.lat},${center.lon})" +
+            "[\"maxspeed\"][\"highway\"~\"^($DRIVABLE_HIGHWAYS)$\"];" +
+            "out tags geom;"
+        val json = try {
+            rawQuery(query)
+        } catch (e: IOException) {
+            return emptyList()
+        }
+        val elements = JSONObject(json).getJSONArray("elements")
+        val ways = ArrayList<SpeedLimitWay>(elements.length())
+        for (i in 0 until elements.length()) {
+            val el = elements.getJSONObject(i)
+            val kmh = el.optJSONObject("tags")?.optString("maxspeed")
+                ?.takeIf { it.isNotBlank() }?.let { parseMaxSpeed(it) } ?: continue
+            val geometry = el.optJSONArray("geometry") ?: continue
+            val pts = ArrayList<LatLon>(geometry.length())
+            for (j in 0 until geometry.length()) {
+                val g = geometry.getJSONObject(j)
+                pts.add(LatLon(g.getDouble("lat"), g.getDouble("lon")))
+            }
+            if (pts.size >= 2) ways.add(SpeedLimitWay(kmh, pts))
+        }
+        return ways
+    }
+
+    /**
+     * Posted limit for [point] snapped locally against a prefetched [ways] set.
+     * Same alignment logic as [nearestSpeedLimitKmh] — a road must run roughly
+     * along [headingDeg] to win, so the cross street and frontage road are
+     * rejected — but with no network call, so it's cheap enough to run on
+     * every fix.
+     */
+    fun snapSpeedLimitKmh(
+        point: LatLon,
+        headingDeg: Double?,
+        ways: List<SpeedLimitWay>,
+    ): Double? {
+        var aligned: Double? = null
+        var alignedDist = Double.MAX_VALUE
+        var nearest: Double? = null
+        var nearestDist = Double.MAX_VALUE
+        for (way in ways) {
+            for (j in 0 until way.points.size - 1) {
+                val a = way.points[j]
+                val b = way.points[j + 1]
+                val d = distanceToSegmentMeters(point, a, b)
+                if (d > MAX_SNAP_METERS) continue
+                if (d < nearestDist) {
+                    nearestDist = d
+                    nearest = way.kmh
+                }
+                if (headingDeg != null && d < alignedDist && alignsWith(a, b, headingDeg)) {
+                    alignedDist = d
+                    aligned = way.kmh
+                }
+            }
+        }
+        return aligned ?: nearest
+    }
+
     /** Distance from [p] to the segment [a]→[b], on a local flat projection. */
     fun distanceToSegmentMeters(p: LatLon, a: LatLon, b: LatLon): Double {
         val mPerLat = 111_320.0

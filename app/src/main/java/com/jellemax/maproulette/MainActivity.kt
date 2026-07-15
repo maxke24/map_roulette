@@ -26,7 +26,7 @@ import com.jellemax.maproulette.ui.HistoryScreen
 import com.jellemax.maproulette.ui.MapScreen
 import com.jellemax.maproulette.ui.SettingsScreen
 import com.jellemax.maproulette.ui.isAppDarkTheme
-import org.osmdroid.config.Configuration
+import org.maplibre.android.MapLibre
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,9 +35,9 @@ class MainActivity : ComponentActivity() {
         // A map app is glanced at while driving: keep the screen awake while visible.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Settings.init(this)
-        // osmdroid requires a distinct user agent for its tile servers.
-        Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
-        Configuration.getInstance().userAgentValue = packageName
+        // MapLibre must be initialised before any MapView is created. No API key:
+        // OpenFreeMap tiles are keyless, so no token provider is needed.
+        MapLibre.getInstance(this)
         setContent {
             val context = LocalContext.current
             val theme by Settings.theme.collectAsStateWithLifecycle()

@@ -38,7 +38,7 @@ Don't know where to drive? Set a radius, spin, get a random point on a real road
 
 ## Stack
 
-Kotlin, Jetpack Compose, Material 3, osmdroid (OpenStreetMap tiles), Overpass API,
+Kotlin, Jetpack Compose, Material 3, MapLibre GL (OpenFreeMap vector tiles), Overpass API,
 GraphHopper for routing, fused location provider, Wearable Message API for the watch.
 Trips and traces stored as JSON in app-private storage. Min SDK 26 (Android 8.0).
 
