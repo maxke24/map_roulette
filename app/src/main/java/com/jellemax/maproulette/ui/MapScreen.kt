@@ -535,7 +535,7 @@ fun MapScreen(
     // Push overlay state to the map whenever anything drawable changes. The
     // layers are created once per style; here we only swap their GeoJSON data.
     LaunchedEffect(mapOverlays, myLocation, destination, route, radiusKm, mode,
-        directionDeg, navigating, cameraActive, candidates) {
+        directionDeg, navigating, candidates) {
         val overlays = mapOverlays ?: return@LaunchedEffect
         // For round trips the slider is trip length; reach ≈ length / 4. Hidden
         // while navigating. Null myLocation hides it too.
@@ -555,8 +555,9 @@ fun MapScreen(
             candidates = candidates.mapIndexed { i, c ->
                 CandidatePin(c.destination, CANDIDATE_COLORS[i % CANDIDATE_COLORS.size])
             },
-            // While following, the frame loop owns the position dot (below).
-            showPosition = !cameraActive,
+            // Dot updates per fix (~1 Hz); the eased camera glides the map under
+            // it, so it stays smooth without a per-frame source rewrite.
+            showPosition = true,
         )
     }
 
@@ -736,12 +737,10 @@ fun MapScreen(
             zoom += (camTargetZoom - zoom) * (1.0 - exp(-dt / CAM_ZOOM_TAU))
 
             // Heading-up while moving: MapLibre bearing points the camera along
-            // travel, so the road you're on runs up the screen.
+            // travel, so the road you're on runs up the screen. The camera-move
+            // listener redraws the fog; the position dot is world-fixed and rides
+            // along on its own.
             setCamera(map, lat, lon, zoom, bearing)
-            // Frame loop owns the position dot so it glides with the map instead
-            // of hopping once a second; fog is screen-space, so it redraws too.
-            mapOverlays?.setPosition(LatLon(lat, lon))
-            fogView.invalidate()
         }
     }
 

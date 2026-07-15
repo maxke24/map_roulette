@@ -150,13 +150,6 @@ class MapOverlays(private val style: Style, context: Context) {
         else FeatureCollection.fromFeatures(emptyList()))
     }
 
-    /** Move just the own-position dot; called every frame by the follow loop. */
-    fun setPosition(at: LatLon?) {
-        setData(SRC_POSITION, if (at != null)
-            FeatureCollection.fromFeature(Feature.fromGeometry(Point.fromLngLat(at.lon, at.lat)))
-        else FeatureCollection.fromFeatures(emptyList()))
-    }
-
     companion object {
         const val ROUTE_COLOR = "#00B3A4" // teal — Waze-family, our own identity
     }
@@ -253,8 +246,28 @@ class FogView(context: Context) : View(context) {
         val corridorPx = max(18f, corridorMeters / metersPerPx)
         clearPaint.strokeWidth = corridorPx
 
+        // toScreenLocation is a per-point JNI call, so projecting every trace
+        // every frame is what made panning lag. Cull whole traces whose bounding
+        // box doesn't touch the padded viewport first — most are off-screen when
+        // zoomed in, and the bbox test is cheap arithmetic with no projection.
+        val vb = proj.visibleRegion.latLngBounds
+        val padDeg = (corridorMeters * 2.0) / 111_000.0
+        val north = vb.latitudeNorth + padDeg
+        val south = vb.latitudeSouth - padDeg
+        val east = vb.longitudeEast + padDeg
+        val west = vb.longitudeWest - padDeg
+
         val pt = PointF()
         for (trace in traces) {
+            if (trace.isEmpty()) continue
+            var tN = -90.0; var tS = 90.0; var tE = -180.0; var tW = 180.0
+            for (p in trace) {
+                if (p.lat > tN) tN = p.lat
+                if (p.lat < tS) tS = p.lat
+                if (p.lon > tE) tE = p.lon
+                if (p.lon < tW) tW = p.lon
+            }
+            if (tS > north || tN < south || tW > east || tE < west) continue
             val path = Path()
             var first = true
             for (p in trace) {
