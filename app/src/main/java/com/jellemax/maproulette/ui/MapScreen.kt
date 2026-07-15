@@ -5,8 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color as AndroidColor
-import android.graphics.Paint as AndroidPaint
+import android.graphics.RectF
 import java.io.IOException
 import android.net.Uri
 import android.os.Build
@@ -89,6 +88,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -141,18 +141,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.tileprovider.tilesource.XYTileSource
-import org.osmdroid.util.BoundingBox
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
+import org.maplibre.android.camera.CameraUpdateFactory
+import org.maplibre.android.geometry.LatLng
+import org.maplibre.android.maps.MapLibreMap
+import org.maplibre.android.maps.MapView
+import org.maplibre.android.maps.Style
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.random.Random
-import org.osmdroid.views.overlay.MapEventsOverlay
-import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Polygon
-import org.osmdroid.views.overlay.Polyline
 
 private val DIRECTION_NAMES = listOf("North", "North-east", "East", "South-east",
     "South", "South-west", "West", "North-west")
@@ -182,6 +178,10 @@ private fun smoothBearing(current: Float?, target: Float, alpha: Float = 0.3f): 
 private const val CAM_POS_TAU = 0.35
 private const val CAM_BEARING_TAU = 0.5
 private const val CAM_ZOOM_TAU = 1.2
+
+// Padding kept around a fitted route/candidate spread so pins and the trip card
+// don't sit against the screen edge.
+private const val FIT_PADDING_PX = 140
 
 // Panning or pinching parks the camera instead of forcing you to hunt for the
 // follow button. Driving off takes it back: above this speed, this long after
@@ -284,16 +284,12 @@ fun MapScreen(
     // straight from the tracking service, so fog and position update in real
     // time instead of only when a trip is saved.
     val storeVersion by TraceStore.version.collectAsStateWithLifecycle()
-    val traces = remember(storeVersion) {
-        TraceStore.loadAll(context).map { trace -> trace.map { GeoPoint(it.lat, it.lon) } }
-    }
+    val traces = remember(storeVersion) { TraceStore.loadAll(context) }
     // Friends' territory, unioned into the same fog. Empty unless both sides
     // opted in; the overlay can't tell whose trace is whose, and neither can we.
     val shareFog by Settings.shareFog.collectAsStateWithLifecycle()
     val friendTraceSource by FriendFog.traces.collectAsStateWithLifecycle()
-    val friendTraces = remember(friendTraceSource) {
-        friendTraceSource.map { trace -> trace.map { GeoPoint(it.lat, it.lon) } }
-    }
+    val friendTraces = friendTraceSource
     val stats by TripTrackingService.stats.collectAsStateWithLifecycle()
     val liveFix by TripTrackingService.lastFix.collectAsStateWithLifecycle()
     val liveTrace by TripTrackingService.liveTrace.collectAsStateWithLifecycle()
@@ -310,8 +306,11 @@ fun MapScreen(
     var lastGestureMs by remember { mutableLongStateOf(0L) }
     var settingsCollapsed by rememberSaveable { mutableStateOf(false) }
     var ambientSpeedLimitKmh by remember { mutableStateOf<Double?>(null) }
-    var lastSpeedLimitQueryPos by remember { mutableStateOf<LatLon?>(null) }
-    var lastSpeedLimitQueryMs by remember { mutableLongStateOf(0L) }
+    var speedLimitWays by remember {
+        mutableStateOf<List<RoadRoulette.SpeedLimitWay>>(emptyList())
+    }
+    var speedLimitWaysCenter by remember { mutableStateOf<LatLon?>(null) }
+    var speedLimitFetchMs by remember { mutableLongStateOf(0L) }
     var speedLimitMisses by remember { mutableIntStateOf(0) }
 
     // Where the camera is heading. GPS delivers a fix about once a second; the
@@ -358,53 +357,54 @@ fun MapScreen(
         else FriendFog.clear()
     }
 
-    // CARTO basemaps (retina): clean modern cartography, light + dark variant.
+    // OpenFreeMap vector basemap: bright "liberty" by day, "dark" by night.
     val themePref by Settings.theme.collectAsStateWithLifecycle()
     val darkTheme = isAppDarkTheme(themePref)
     val fogRadius by Settings.fogRadiusMeters.collectAsStateWithLifecycle()
-    val tileSource = remember(darkTheme) {
-        val style = if (darkTheme) "dark_all" else "rastertiles/voyager"
-        XYTileSource(
-            if (darkTheme) "CartoDarkMatter" else "CartoVoyager",
-            0, 20, 512, "@2x.png",
-            arrayOf(
-                "https://a.basemaps.cartocdn.com/$style/",
-                "https://b.basemaps.cartocdn.com/$style/",
-                "https://c.basemaps.cartocdn.com/$style/",
-            ),
-            "© OpenStreetMap contributors © CARTO",
-        )
-    }
-    val mapView = remember {
-        MapView(context).apply {
-            setTileSource(tileSource)
-            setMultiTouchControls(true)
-            controller.setZoom(6.0)
-        }
-    }
-    // Kept across overlay rebuilds: while the camera is active the frame loop
-    // moves this marker in step with the map, so the dot doesn't hop once a
-    // second against a map that is gliding.
-    val positionMarker = remember {
-        Marker(mapView).apply {
-            icon = ContextCompat.getDrawable(context, R.drawable.ic_map_dot)
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-            title = "You are here"
-        }
-    }
-    LaunchedEffect(tileSource) { mapView.setTileSource(tileSource) }
+
+    val mapView = remember { MapView(context) }
+    val fogView = remember { FogView(context) }
+    var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
+    var mapOverlays by remember { mutableStateOf<MapOverlays?>(null) }
+
+    // MapView lifecycle. The map arrives asynchronously; effects that touch it
+    // guard on `mapLibreMap` being non-null.
     DisposableEffect(Unit) {
+        mapView.onCreate(null)
+        mapView.onStart()
         mapView.onResume()
+        mapView.getMapAsync { map ->
+            map.uiSettings.isCompassEnabled = false
+            map.uiSettings.isRotateGesturesEnabled = true
+            mapLibreMap = map
+        }
         onDispose {
+            fogView.map = null
             mapView.onPause()
-            mapView.onDetach()
+            mapView.onStop()
+            mapView.onDestroy()
         }
     }
 
-    // Park the camera as soon as the map is dragged or pinched. osmdroid's own
-    // MapListener can't be used for this: the frame loop calls setCenter every
-    // frame, so it fires constantly and can't tell us apart from the user.
-    // The listener returns false, leaving MapView to handle the gesture itself.
+    // (Re)load the style on theme flip; rebuild the overlay layers on the new
+    // Style and (re)attach the fog view over the GL surface.
+    LaunchedEffect(darkTheme, mapLibreMap) {
+        val map = mapLibreMap ?: return@LaunchedEffect
+        map.setStyle(Style.Builder().fromUri(openFreeMapStyleUrl(darkTheme))) { style ->
+            mapOverlays = MapOverlays(style, context)
+            fogView.map = map
+            if (mapView.indexOfChild(fogView) < 0) {
+                mapView.addView(fogView, android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+            }
+        }
+    }
+
+    // Park the camera as soon as the map is dragged or pinched. A camera-move
+    // listener can't be used for this: the frame loop moves the camera every
+    // frame, so it would fire constantly and couldn't tell us from the user.
+    // The touch listener returns false, leaving MapView to handle the gesture.
     DisposableEffect(mapView) {
         val slop = ViewConfiguration.get(context).scaledTouchSlop
         var downX = 0f
@@ -458,8 +458,8 @@ fun MapScreen(
                     ?: client.lastLocation.await()
                 if (loc != null) {
                     myLocation = LatLon(loc.latitude, loc.longitude)
-                    mapView.controller.setZoom(Settings.defaultZoom.value.toDouble())
-                    mapView.controller.setCenter(GeoPoint(loc.latitude, loc.longitude))
+                    mapLibreMap?.moveCamera(CameraUpdateFactory.newLatLngZoom(
+                        LatLng(loc.latitude, loc.longitude), Settings.defaultZoom.value.toDouble()))
                 } else {
                     error = "Could not get location; is GPS on?"
                 }
@@ -529,115 +529,74 @@ fun MapScreen(
         // Buy the same grace period a pan gets, so a pick made at speed isn't
         // re-centered before you've seen the route you just chose.
         lastGestureMs = System.currentTimeMillis()
-        mapView.zoomToBoundingBox(
-            BoundingBox.fromGeoPoints(
-                listOf(GeoPoint(loc.lat, loc.lon),
-                    GeoPoint(c.destination.lat, c.destination.lon))
-            ).increaseByScale(1.4f),
-            true,
+        mapLibreMap?.let { cameraForPoints(it, listOf(loc, c.destination), FIT_PADDING_PX) }
+    }
+
+    // Push overlay state to the map whenever anything drawable changes. The
+    // layers are created once per style; here we only swap their GeoJSON data.
+    LaunchedEffect(mapOverlays, myLocation, destination, route, radiusKm, mode,
+        directionDeg, navigating, candidates) {
+        val overlays = mapOverlays ?: return@LaunchedEffect
+        // For round trips the slider is trip length; reach ≈ length / 4. Hidden
+        // while navigating. Null myLocation hides it too.
+        val reachMeters = myLocation?.let {
+            when {
+                navigating -> null
+                mode.roundTrip -> radiusKm * 250.0
+                else -> radiusKm * 1000.0
+            }
+        }
+        overlays.render(
+            myLocation = myLocation,
+            destination = destination,
+            routePolyline = route?.polyline,
+            reachMeters = reachMeters,
+            directionDeg = directionDeg?.toInt(),
+            candidates = candidates.mapIndexed { i, c ->
+                CandidatePin(c.destination, CANDIDATE_COLORS[i % CANDIDATE_COLORS.size])
+            },
+            // Dot updates per fix (~1 Hz); the eased camera glides the map under
+            // it, so it stays smooth without a per-frame source rewrite.
+            showPosition = true,
         )
     }
 
-    // Redraw overlays whenever location, radius, destination, or route changes.
-    LaunchedEffect(myLocation, destination, route, radiusKm, mode, directionDeg,
-        fogEnabled, fogRadius, traces, friendTraces, liveTrace, navigating, cameraActive,
-        candidates) {
-        mapView.overlays.clear()
-        if (!navigating) {
-            // Long-press drops a destination pin anywhere.
-            mapView.overlays.add(MapEventsOverlay(object : MapEventsReceiver {
-                override fun singleTapConfirmedHelper(p: GeoPoint?) = false
-                override fun longPressHelper(p: GeoPoint?): Boolean {
-                    if (p == null) return false
-                    destination = LatLon(p.latitude, p.longitude)
-                    destinationName = "Dropped pin"
-                    route = null
-                    return true
-                }
-            }))
+    // Fog-of-war: keep the overlay view fed with the current traces, then redraw.
+    LaunchedEffect(fogEnabled, fogRadius, traces, friendTraces, liveTrace, myLocation) {
+        val mine = if (liveTrace.size >= 2) traces + listOf(liveTrace) else traces
+        fogView.active = fogEnabled
+        fogView.traces = mine + friendTraces
+        fogView.currentLocation = myLocation
+        fogView.corridorMeters = fogRadius
+        fogView.invalidate()
+    }
+
+    // Long-press drops a destination pin; a tap on a candidate dot commits to it.
+    // Registered once the map is ready; the listeners read live state via refs.
+    val candidatesRef = rememberUpdatedState(candidates)
+    val navigatingRef = rememberUpdatedState(navigating)
+    LaunchedEffect(mapLibreMap) {
+        val map = mapLibreMap ?: return@LaunchedEffect
+        // The fog is screen-space, projected through the map — redraw it on every
+        // camera change so a manual pan/pinch keeps it glued to the map, not just
+        // while the follow loop is running.
+        map.addOnCameraMoveListener { fogView.invalidate() }
+        map.addOnCameraIdleListener { fogView.invalidate() }
+        map.addOnMapLongClickListener { ll ->
+            if (navigatingRef.value) return@addOnMapLongClickListener false
+            destination = LatLon(ll.latitude, ll.longitude)
+            destinationName = "Dropped pin"
+            route = null
+            true
         }
-        if (fogEnabled) {
-            val live = liveTrace.map { GeoPoint(it.lat, it.lon) }
-            val mine = if (live.size >= 2) traces + listOf(live) else traces
-            val all = mine + friendTraces
-            mapView.overlays.add(FogOverlay(
-                tracesProvider = { all },
-                currentLocationProvider = {
-                    myLocation?.let { GeoPoint(it.lat, it.lon) }
-                },
-                corridorMeters = fogRadius,
-            ))
+        map.addOnMapClickListener { ll ->
+            val p = map.projection.toScreenLocation(ll)
+            val tap = RectF(p.x - 22f, p.y - 22f, p.x + 22f, p.y + 22f)
+            val idx = map.queryRenderedFeatures(tap, LAYER_CANDIDATES)
+                .firstOrNull()?.getNumberProperty("index")?.toInt()
+            val cs = candidatesRef.value
+            if (idx != null && idx < cs.size) { choose(cs[idx]); true } else false
         }
-        val loc = myLocation
-        if (loc != null) {
-            val center = GeoPoint(loc.lat, loc.lon)
-            val reachMeters = if (mode.roundTrip) radiusKm * 250.0 else radiusKm * 1000.0
-            if (!navigating) {
-                mapView.overlays.add(Polygon(mapView).apply {
-                    // For round trips the slider is trip length; reach ≈ length / 4.
-                    points = Polygon.pointsAsCircle(center, reachMeters)
-                    outlinePaint.color = AndroidColor.argb(180, 33, 150, 243)
-                    outlinePaint.strokeWidth = 3f
-                    fillPaint.color = AndroidColor.argb(24, 33, 150, 243)
-                })
-                directionDeg?.let { dir ->
-                    // Wedge showing the chosen spin direction (±45°).
-                    val arc = (-45..45 step 5).map { d ->
-                        GeoPoint(loc.lat, loc.lon).destinationPoint(
-                            reachMeters, (dir + d).toDouble())
-                    }
-                    mapView.overlays.add(Polygon(mapView).apply {
-                        points = listOf(center) + arc + center
-                        outlinePaint.color = AndroidColor.argb(150, 255, 152, 0)
-                        outlinePaint.strokeWidth = 2f
-                        fillPaint.color = AndroidColor.argb(28, 255, 152, 0)
-                    })
-                }
-            }
-            // While following, the frame loop owns the marker position.
-            if (!cameraActive) positionMarker.position = center
-            mapView.overlays.add(positionMarker)
-        }
-        // Spin results are pins before they are a list: you pick where you are
-        // going by looking at it. Color matches the row in the card, and tapping
-        // the pin commits to it just as tapping the row does.
-        candidates.forEachIndexed { index, c ->
-            mapView.overlays.add(Marker(mapView).apply {
-                position = GeoPoint(c.destination.lat, c.destination.lon)
-                icon = ContextCompat.getDrawable(context, R.drawable.ic_map_candidate_pin)
-                    ?.mutate()?.apply { setTint(CANDIDATE_COLORS[index % CANDIDATE_COLORS.size]) }
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                title = c.name ?: "Option ${index + 1}"
-                setOnMarkerClickListener { _, _ -> choose(c); true }
-            })
-        }
-        val dest = destination
-        if (dest != null) {
-            mapView.overlays.add(Marker(mapView).apply {
-                position = GeoPoint(dest.lat, dest.lon)
-                icon = ContextCompat.getDrawable(context, R.drawable.ic_map_pin)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                title = "Destination"
-            })
-        }
-        val loop = route
-        if (loop != null) {
-            val points = loop.polyline.map { GeoPoint(it.lat, it.lon) }
-            // Dark casing under the colored line so the route reads clearly over any basemap.
-            mapView.overlays.add(Polyline(mapView).apply {
-                setPoints(points)
-                outlinePaint.color = AndroidColor.argb(200, 0, 0, 0)
-                outlinePaint.strokeWidth = 16f
-                outlinePaint.strokeCap = AndroidPaint.Cap.ROUND
-            })
-            mapView.overlays.add(Polyline(mapView).apply {
-                setPoints(points)
-                outlinePaint.color = AndroidColor.argb(255, 233, 30, 99)
-                outlinePaint.strokeWidth = 10f
-                outlinePaint.strokeCap = AndroidPaint.Cap.ROUND
-            })
-        }
-        mapView.invalidate()
     }
 
     fun stopNavigation() {
@@ -683,38 +642,41 @@ fun MapScreen(
         }
     }
 
-    // Ambient speed-limit sign while just driving (not navigating): throttled
-    // so we don't hammer Overpass every GPS fix — requery only after moving
-    // ~250m or 25s, matching NavEngine's own speedLimitKmh via GraphHopper.
-    // Keyed on `navigating` only (not `liveFix`) and collecting the fix flow
-    // ourselves: keying on liveFix restarted this effect on every GPS update
-    // (every ~0.5-1s), which cancelled the in-flight Overpass request before
-    // a slower mirror could ever answer — the sign could go stale for as
-    // long as the network round-trip kept losing that race.
+    // Ambient speed-limit sign while just driving (not navigating). We prefetch
+    // every tagged way in a ~1.5km circle once, then snap locally against that
+    // set on every fix — so the sign flips the instant you cross onto a new
+    // road, instead of lagging a throttled Overpass round-trip behind you. The
+    // fetch refreshes only when you near the edge of what you have (throttled on
+    // failure so a network blip doesn't hammer the mirrors).
     LaunchedEffect(navigating) {
         if (navigating) return@LaunchedEffect
         TripTrackingService.lastFix.collect { fix ->
             fix ?: return@collect
             if (fix.speedMps < 2.0) return@collect
             val pos = LatLon(fix.lat, fix.lon)
-            val moved = lastSpeedLimitQueryPos?.let { RoadRoulette.distanceMeters(it, pos) }
+            val fromCenter = speedLimitWaysCenter?.let { RoadRoulette.distanceMeters(it, pos) }
                 ?: Double.MAX_VALUE
             val now = System.currentTimeMillis()
-            if (moved < 250.0 && now - lastSpeedLimitQueryMs < 25_000) return@collect
-            lastSpeedLimitQueryPos = pos
-            lastSpeedLimitQueryMs = now
-            // Heading lets the lookup reject the cross street and the frontage
-            // road, which is most of why the sign used to show nonsense.
-            val result = withContext(Dispatchers.IO) {
-                RoadRoulette.nearestSpeedLimitKmh(pos, fix.bearingDeg?.toDouble())
+            if (fromCenter > RoadRoulette.SPEED_PREFETCH_RADIUS_M - 500.0 &&
+                now - speedLimitFetchMs > 10_000
+            ) {
+                speedLimitFetchMs = now
+                val ways = withContext(Dispatchers.IO) { RoadRoulette.speedLimitWays(pos) }
+                if (ways.isNotEmpty()) {
+                    speedLimitWays = ways
+                    speedLimitWaysCenter = pos
+                }
             }
+            // Heading lets the snap reject the cross street and the frontage
+            // road, which is most of why the sign used to show nonsense.
+            val result = RoadRoulette.snapSpeedLimitKmh(
+                pos, fix.bearingDeg?.toDouble(), speedLimitWays)
             if (result != null) {
                 ambientSpeedLimitKmh = result
                 speedLimitMisses = 0
             } else if (++speedLimitMisses >= 3) {
-                // One missed lookup is usually a gap in tagged ways or a network
-                // blip, not the limit actually ending — only clear the sign after
-                // a few in a row so it doesn't flicker away and back.
+                // A few misses in a row means the limit really ended (or the road
+                // isn't tagged), not a one-fix gap — only then clear the sign.
                 ambientSpeedLimitKmh = null
             }
         }
@@ -742,17 +704,20 @@ fun MapScreen(
     // `haveFix` is a key so that turning follow on before the first fix arrives
     // still starts the loop once it does, instead of leaving it returned-out.
     val haveFix = camTarget != null || myLocation != null
-    LaunchedEffect(cameraActive, haveFix) {
+    LaunchedEffect(cameraActive, haveFix, mapLibreMap) {
+        val map = mapLibreMap ?: return@LaunchedEffect
         if (!cameraActive) {
-            mapView.setMapOrientation(0f, false)
-            mapView.invalidate()
+            // Level back to north-up when we stop following.
+            map.cameraPosition.target?.let {
+                setCamera(map, it.latitude, it.longitude, map.cameraPosition.zoom, 0f)
+            }
             return@LaunchedEffect
         }
         val start = camTarget ?: myLocation ?: return@LaunchedEffect
         var lat = start.lat
         var lon = start.lon
         var bearing = camTargetBearing ?: 0f
-        var zoom = mapView.zoomLevelDouble
+        var zoom = map.cameraPosition.zoom.takeIf { it > 1.0 } ?: camTargetZoom
         var lastNs = withFrameNanos { it }
         while (true) {
             val ns = withFrameNanos { it }
@@ -771,13 +736,11 @@ fun MapScreen(
             }
             zoom += (camTargetZoom - zoom) * (1.0 - exp(-dt / CAM_ZOOM_TAU))
 
-            // Heading-up while moving; osmdroid rotates counterclockwise. Skip its
-            // redraw — setCenter below invalidates once for all three changes.
-            mapView.setMapOrientation(-bearing, false)
-            if (abs(zoom - mapView.zoomLevelDouble) > 0.005) mapView.controller.setZoom(zoom)
-            val here = GeoPoint(lat, lon)
-            positionMarker.position = here
-            mapView.controller.setCenter(here)
+            // Heading-up while moving: MapLibre bearing points the camera along
+            // travel, so the road you're on runs up the screen. The camera-move
+            // listener redraws the fog; the position dot is world-fixed and rides
+            // along on its own.
+            setCamera(map, lat, lon, zoom, bearing)
         }
     }
 
@@ -875,12 +838,7 @@ fun MapScreen(
                     route = result
                     destination = null
                     destinationName = null
-                    mapView.zoomToBoundingBox(
-                        BoundingBox.fromGeoPoints(
-                            (result.polyline + loc).map { GeoPoint(it.lat, it.lon) }
-                        ).increaseByScale(1.3f),
-                        true,
-                    )
+                    mapLibreMap?.let { cameraForPoints(it, result.polyline + loc, FIT_PADDING_PX) }
                 } else {
                     val bearing = directionDeg?.toDouble()
                     val minMeters = minRadiusKm.toDouble() * 1000.0
@@ -903,12 +861,9 @@ fun MapScreen(
                             ?: IOException("Failed to find a destination")
                     }
                     candidates = results
-                    mapView.zoomToBoundingBox(
-                        BoundingBox.fromGeoPoints(
-                            (results.map { it.destination } + loc).map { GeoPoint(it.lat, it.lon) }
-                        ).increaseByScale(1.4f),
-                        true,
-                    )
+                    mapLibreMap?.let {
+                        cameraForPoints(it, results.map { c -> c.destination } + loc, FIT_PADDING_PX)
+                    }
                 }
             } catch (e: TimeoutCancellationException) {
                 // Don't let a fallback timeout hide why the own server failed.
@@ -1206,8 +1161,8 @@ fun MapScreen(
                 route = null
                 camSuspended = true
                 lastGestureMs = System.currentTimeMillis()
-                mapView.controller.animateTo(
-                    GeoPoint(r.location.lat, r.location.lon), 14.0, 800L)
+                mapLibreMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(
+                    LatLng(r.location.lat, r.location.lon), 14.0), 800)
             },
             onDismiss = { searchOpen = false },
         )

@@ -106,6 +106,7 @@ class TripTrackingService : Service() {
         private const val ACTION_START_TRIP = "com.jellemax.maproulette.START_TRIP"
         private const val ACTION_END_TRIP = "com.jellemax.maproulette.END_TRIP"
         private const val ACTION_TRANSITION = "com.jellemax.maproulette.ACTIVITY_TRANSITION"
+        private const val ACTION_REFRESH = "com.jellemax.maproulette.REFRESH"
         private const val CHANNEL_ID = "trip_tracking"
         private const val NOTIFICATION_ID = 1
 
@@ -144,6 +145,15 @@ class TripTrackingService : Service() {
         fun startMonitoring(context: Context) {
             ContextCompat.startForegroundService(
                 context, Intent(context, TripTrackingService::class.java))
+        }
+
+        /** Nudge the service to rebuild its notification — e.g. after the
+         *  auto-detect setting is toggled, so the text reflects it at once. */
+        fun refresh(context: Context) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, TripTrackingService::class.java).setAction(ACTION_REFRESH),
+            )
         }
 
         /** Manually start a trip (Go/Track button). */
@@ -751,6 +761,7 @@ class TripTrackingService : Service() {
         val stats = _stats.value
         val text = when {
             stats != null -> "Tracking your ${stats.mode.label.lowercase()} trip…"
+            !Settings.autoDetectDrives.value -> "Auto-tracking off"
             stationary -> "Standing by"
             else -> "Watching for trips"
         }

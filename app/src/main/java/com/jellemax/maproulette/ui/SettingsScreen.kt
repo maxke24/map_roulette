@@ -47,6 +47,7 @@ import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
+import com.jellemax.maproulette.tracking.TripTrackingService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -122,7 +123,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                     Switch(
                         checked = autoDetect,
-                        onCheckedChange = { Settings.setAutoDetectDrives(it) },
+                        onCheckedChange = {
+                            Settings.setAutoDetectDrives(it)
+                            TripTrackingService.refresh(context)
+                        },
                     )
                 }
             }
