@@ -576,6 +576,11 @@ fun MapScreen(
     val navigatingRef = rememberUpdatedState(navigating)
     LaunchedEffect(mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
+        // The fog is screen-space, projected through the map — redraw it on every
+        // camera change so a manual pan/pinch keeps it glued to the map, not just
+        // while the follow loop is running.
+        map.addOnCameraMoveListener { fogView.invalidate() }
+        map.addOnCameraIdleListener { fogView.invalidate() }
         map.addOnMapLongClickListener { ll ->
             if (navigatingRef.value) return@addOnMapLongClickListener false
             destination = LatLon(ll.latitude, ll.longitude)
