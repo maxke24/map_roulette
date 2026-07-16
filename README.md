@@ -4,9 +4,9 @@ Don't know where to drive? Set a radius, spin, get a random point on a real road
 
 ## Features
 
-- **Modes**: bike (1–30 km), car (5–100 km), and moto (30–400 km) — each picking the road
-  types that suit it: cycleways and paths for the bike, motorways only for the car,
-  the rural network for the moto.
+- **Modes**: walk (1–15 km), bike (1–30 km), car (5–100 km), and moto (30–400 km) — each
+  picking the road types that suit it: footways and paths for walking, cycleways for the
+  bike, motorways only for the car, the rural network for the moto.
 - **Spin**: picks a random point within your chosen radius, using OpenStreetMap data via
   the Overpass API. No API key needed. Samples a random sub-area instead of downloading
   every road in the circle, so it stays fast at large radii. Aim it at a random road, or
@@ -21,12 +21,21 @@ Don't know where to drive? Set a radius, spin, get a random point on a real road
   against the posted limit, rerouting when you leave the line — routed by your own
   GraphHopper instance. Or hand the destination off to Google Maps, Waze, or any
   installed maps app.
+- **Speed cameras**: fixed cameras and Belgian trajectcontrole sections from OpenStreetMap
+  (via Overpass), drawn on the map. A chime warns when a camera lies ahead and you're over
+  the posted limit, and while driving an average-speed section the running average is shown
+  next to your speed — the number the camera pair actually judges you on.
 - **On your wrist**: a Wear OS companion shows the next maneuver and how far to it, and
   wakes itself on the watch when navigation starts on the phone.
 - **Track**: foreground service records your ride — duration, distance, current and top
   speed. On the moto it also records maximum lean angle and cornering g, and in the car
-  just the g. A bicycle gets neither: from a rigid mount a lean angle means something,
-  from a cradle it is the phone sliding around.
+  just the g. A bicycle and a walk get neither: from a rigid mount a lean angle means
+  something, from a cradle it is the phone sliding around.
+- **Vehicle auto-detect**: assign a paired Bluetooth device to a vehicle (a Cardo intercom
+  to the moto, the car's infotainment to driving, your earbuds to walking) and a trip logs
+  under that vehicle whenever the device is connected. With nothing connected, a sustained
+  walking pace logs as a walk. These are Bluetooth Classic bonds, so no scanning and no
+  location permission — just connect/disconnect.
 - **Fog of war**: everywhere you have driven is uncovered on the map, and stays uncovered.
 - **Coverage and badges**: how much of each municipality you have driven — resolved from
   OSM `admin_level=8` boundaries — plus badges for distance, top speed, rides,
@@ -34,7 +43,8 @@ Don't know where to drive? Set a radius, spin, get a random point on a real road
 - **Friends**: opt in to a shared fog of war and see where they have been. Off by default,
   and reciprocal: the server only hands you a friend's traces if you are sharing yours.
 - **History**: past trips with duration, distance, average and top speed, and — where the
-  mode records them — peak lean angle and g.
+  mode records them — peak lean angle and g. Correct a trip's vehicle if it was
+  misclassified, or delete a false-positive detection.
 
 ## Stack
 

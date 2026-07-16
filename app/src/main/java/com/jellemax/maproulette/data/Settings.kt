@@ -52,12 +52,16 @@ object Settings {
     private val _tripMode = MutableStateFlow(TravelMode.CAR)
     val tripMode: StateFlow<TravelMode> = _tripMode
 
-    /** Bluetooth devices mapped to a vehicle: address → mode. When a mapped
-     *  device connects, the tracking service switches the trip mode to it, so a
+    /** A Bluetooth device the user assigned to a vehicle. [name] is kept so the
+     *  Settings list can show it even when the device isn't currently reachable. */
+    data class VehicleDevice(val address: String, val name: String, val mode: TravelMode)
+
+    /** Bluetooth devices mapped to a vehicle, keyed by address. When a mapped
+     *  device connects, the tracking service logs the trip under its [mode], so a
      *  drive auto-logs under the right vehicle. Empty = feature off. These are
      *  Bluetooth Classic bonds (a Cardo intercom, a car's infotainment), not BLE. */
-    private val _vehicleDevices = MutableStateFlow<Map<String, TravelMode>>(emptyMap())
-    val vehicleDevices: StateFlow<Map<String, TravelMode>> = _vehicleDevices
+    private val _vehicleDevices = MutableStateFlow<Map<String, VehicleDevice>>(emptyMap())
+    val vehicleDevices: StateFlow<Map<String, VehicleDevice>> = _vehicleDevices
 
     /** Opt in to the shared fog of war. Off by default, and the server only
      *  hands a friend's traces to someone who is also sharing theirs. */
@@ -95,21 +99,41 @@ object Settings {
         _vehicleDevices.value = readVehicleDevices()
     }
 
-    private fun readVehicleDevices(): Map<String, TravelMode> {
+    private fun readVehicleDevices(): Map<String, VehicleDevice> {
         val raw = prefs.getString("vehicle_devices", null) ?: return emptyMap()
         return runCatching {
             val json = JSONObject(raw)
-            json.keys().asSequence().associateWith { TravelMode.of(json.getString(it)) }
+            json.keys().asSequence().associateWith { addr ->
+                // New format: {address: {mode, name}}. Old format (v1.24):
+                // {address: "MODE"} with no name — fall back to the address.
+                when (val v = json.get(addr)) {
+                    is JSONObject -> VehicleDevice(
+                        addr, v.optString("name", addr), TravelMode.of(v.optString("mode")))
+                    else -> VehicleDevice(addr, addr, TravelMode.of(v.toString()))
+                }
+            }
         }.getOrDefault(emptyMap())
     }
 
-    /** Map [address] to [mode], or unmap it when [mode] is null. */
-    fun setVehicleForDevice(address: String, mode: TravelMode?) {
+    /** Assign [address] ([name]) to [mode]. */
+    fun addVehicleDevice(address: String, name: String, mode: TravelMode) {
         val next = _vehicleDevices.value.toMutableMap()
-        if (mode == null) next.remove(address) else next[address] = mode
-        _vehicleDevices.value = next
+        next[address] = VehicleDevice(address, name, mode)
+        writeVehicleDevices(next)
+    }
+
+    /** Forget a device assignment. */
+    fun removeVehicleDevice(address: String) {
+        val next = _vehicleDevices.value.toMutableMap()
+        if (next.remove(address) != null) writeVehicleDevices(next)
+    }
+
+    private fun writeVehicleDevices(map: Map<String, VehicleDevice>) {
+        _vehicleDevices.value = map
         val json = JSONObject()
-        next.forEach { (addr, m) -> json.put(addr, m.name) }
+        map.forEach { (addr, d) ->
+            json.put(addr, JSONObject().put("mode", d.mode.name).put("name", d.name))
+        }
         prefs.edit().putString("vehicle_devices", json.toString()).apply()
     }
 

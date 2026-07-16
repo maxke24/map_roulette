@@ -6,16 +6,22 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -425,20 +431,19 @@ private fun VehicleSection() {
         }
     }
 
-    // Ignore + one option per mode, in a single choice row per device.
-    val options: List<Pair<String, TravelMode?>> =
-        listOf("Ignore" to null) + TravelMode.entries.map { it.label to it }
+    // Which mode's "add device" picker is open, if any.
+    var addTarget by remember { mutableStateOf<TravelMode?>(null) }
 
     SettingsSection("Vehicles") {
         Text(
-            "Match a paired Bluetooth device to a vehicle. When it's connected, " +
-                "trips log under that vehicle automatically — and a walking device " +
-                "(or no connection at a walking pace) logs as a walk.",
+            "Add a Bluetooth device to a vehicle. When it's connected, trips log " +
+                "under that vehicle automatically — and a walking device (or no " +
+                "connection at a walking pace) logs as a walk.",
             style = MaterialTheme.typography.bodySmall,
         )
         if (!hasPerm) {
             Text(
-                "Grant Bluetooth access to list your paired devices.",
+                "Grant Bluetooth access to add your paired devices.",
                 style = MaterialTheme.typography.bodySmall,
             )
             TextButton(onClick = {
@@ -446,34 +451,88 @@ private fun VehicleSection() {
             }) { Text("Allow Bluetooth") }
             return@SettingsSection
         }
-        if (bonded.isEmpty()) {
-            Text(
-                "No paired Bluetooth devices found. Pair your Cardo / car / earbuds " +
-                    "in Android's Bluetooth settings first.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            return@SettingsSection
-        }
-        bonded.forEach { device ->
-            val address = device.address
-            val name = runCatching { device.name }.getOrNull() ?: address
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(name, style = MaterialTheme.typography.bodyLarge)
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    options.forEachIndexed { index, (label, mode) ->
-                        SegmentedButton(
-                            selected = mapping[address] == mode,
+        TravelMode.entries.forEach { mode ->
+            val devices = mapping.values.filter { it.mode == mode }.sortedBy { it.name }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(mode.label, style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold)
+                TextButton(onClick = { addTarget = mode }) {
+                    Icon(Icons.Default.Add, contentDescription = null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add device")
+                }
+            }
+            if (devices.isEmpty()) {
+                Text("No devices", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                devices.forEach { d ->
+                    // Entries migrated from the old format stored the address as
+                    // the name; resolve the real name from the paired list.
+                    val display = if (d.name != d.address) d.name
+                        else bonded.firstOrNull { it.address == d.address }
+                            ?.let { runCatching { it.name }.getOrNull() } ?: d.address
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(display, style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f))
+                        IconButton(
                             onClick = {
-                                Settings.setVehicleForDevice(address, mode)
+                                Settings.removeVehicleDevice(d.address)
                                 TripTrackingService.refresh(context)
                             },
-                            shape = SegmentedButtonDefaults.itemShape(index, options.size),
-                            label = { Text(label, maxLines = 1) },
-                        )
+                            modifier = Modifier.size(28.dp),
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Remove ${d.name}",
+                                Modifier.size(18.dp))
+                        }
                     }
                 }
             }
         }
+    }
+
+    addTarget?.let { mode ->
+        val unassigned = bonded.filter { !mapping.containsKey(it.address) }
+        AlertDialog(
+            onDismissRequest = { addTarget = null },
+            title = { Text("Add a ${mode.label} device") },
+            text = {
+                if (unassigned.isEmpty()) {
+                    Text("No unassigned paired devices. Pair the device in Android's " +
+                        "Bluetooth settings first, or remove it from another vehicle.")
+                } else {
+                    Column {
+                        unassigned.forEach { device ->
+                            val address = device.address
+                            val name = runCatching { device.name }.getOrNull() ?: address
+                            Text(
+                                name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        Settings.addVehicleDevice(address, name, mode)
+                                        TripTrackingService.refresh(context)
+                                        addTarget = null
+                                    }
+                                    .padding(vertical = 12.dp),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { addTarget = null }) { Text("Close") }
+            },
+        )
     }
 }
 

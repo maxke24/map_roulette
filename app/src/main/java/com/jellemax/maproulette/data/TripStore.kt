@@ -26,6 +26,7 @@ data class Trip(
 object TripStore {
 
     private const val FILE_NAME = "trips.json"
+    private const val DELETED_FILE_NAME = "deleted_trips.json"
 
     fun save(context: Context, trip: Trip) {
         writeAll(context, listOf(trip) + load(context))
@@ -39,6 +40,19 @@ object TripStore {
         writeAll(context, trips.map {
             if (it.startTimeMs == startTimeMs) it.copy(mode = mode) else it
         })
+    }
+
+    /**
+     * Delete a trip (e.g. a false-positive auto-detection). The start time is
+     * also tombstoned, so the server's copy — the /sync merge returns the union
+     * and replaces the local store — can't quietly bring it back on the next
+     * sync. Tombstones are honoured in [replaceRaw].
+     */
+    fun delete(context: Context, startTimeMs: Long) {
+        val tombstones = tombstones(context)
+        tombstones.add(startTimeMs)
+        writeTombstones(context, tombstones)
+        writeAll(context, load(context).filterNot { it.startTimeMs == startTimeMs })
     }
 
     private fun writeAll(context: Context, trips: List<Trip>) {
@@ -90,10 +104,39 @@ object TripStore {
         return if (f.exists()) f.readText() else "[]"
     }
 
-    /** Overwrite the store with a merged JSON array from the sync server. */
+    /** Overwrite the store with a merged JSON array from the sync server, minus
+     *  any trips this device has deleted — otherwise the server's copy would
+     *  reappear on every sync. */
     fun replaceRaw(context: Context, json: String) {
-        JSONArray(json) // validate before overwriting
-        file(context).writeText(json)
+        val incoming = JSONArray(json) // validate before overwriting
+        val tombstones = tombstones(context)
+        if (tombstones.isEmpty()) {
+            file(context).writeText(json)
+            return
+        }
+        val kept = JSONArray()
+        for (i in 0 until incoming.length()) {
+            val o = incoming.getJSONObject(i)
+            if (o.optLong("startTimeMs") !in tombstones) kept.put(o)
+        }
+        file(context).writeText(kept.toString())
+    }
+
+    private fun tombstones(context: Context): MutableSet<Long> {
+        val f = File(context.filesDir, DELETED_FILE_NAME)
+        if (!f.exists()) return mutableSetOf()
+        return try {
+            val array = JSONArray(f.readText())
+            (0 until array.length()).map { array.getLong(it) }.toMutableSet()
+        } catch (e: Exception) {
+            mutableSetOf()
+        }
+    }
+
+    private fun writeTombstones(context: Context, ids: Set<Long>) {
+        val array = JSONArray()
+        ids.forEach { array.put(it) }
+        File(context.filesDir, DELETED_FILE_NAME).writeText(array.toString())
     }
 
     private fun file(context: Context) = File(context.filesDir, FILE_NAME)

@@ -12,7 +12,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -22,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -74,22 +77,31 @@ fun HistoryScreen(onBack: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(trips) { trip ->
-                    TripCard(trip) { newMode ->
-                        TripStore.updateMode(context, trip.startTimeMs, newMode)
-                        trips = TripStore.load(context)
-                        // Push the correction so it survives a reinstall / other devices.
-                        SyncClient.syncQuietly(context)
-                    }
+                    TripCard(
+                        trip = trip,
+                        onChangeMode = { newMode ->
+                            TripStore.updateMode(context, trip.startTimeMs, newMode)
+                            trips = TripStore.load(context)
+                            // Push the correction so it survives a reinstall / other devices.
+                            SyncClient.syncQuietly(context)
+                        },
+                        onDelete = {
+                            TripStore.delete(context, trip.startTimeMs)
+                            trips = TripStore.load(context)
+                        },
+                    )
                 }
             }
         }
     }
 }
 
-/** One trip, with a tap-to-correct vehicle picker for false auto-classifications. */
+/** One trip, with a vehicle picker (fix a misclassification) and a delete
+ *  action (drop a false-positive detection). */
 @Composable
-private fun TripCard(trip: Trip, onChangeMode: (TravelMode) -> Unit) {
+private fun TripCard(trip: Trip, onChangeMode: (TravelMode) -> Unit, onDelete: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     Card {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
@@ -100,6 +112,7 @@ private fun TripCard(trip: Trip, onChangeMode: (TravelMode) -> Unit) {
                 Text(
                     "${trip.mode.label} · ${formatDate(trip.startTimeMs)}",
                     style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
                 )
                 Box {
                     IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(28.dp)) {
@@ -114,6 +127,10 @@ private fun TripCard(trip: Trip, onChangeMode: (TravelMode) -> Unit) {
                             )
                         }
                     }
+                }
+                IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete trip",
+                        Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
                 }
             }
             Row(
@@ -141,6 +158,25 @@ private fun TripCard(trip: Trip, onChangeMode: (TravelMode) -> Unit) {
                 }
             }
         }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this trip?") },
+            text = {
+                Text("${trip.mode.label} · ${formatDate(trip.startTimeMs)} — " +
+                    "${formatDistanceKm(trip.distanceMeters)}. This can't be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; onDelete() }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

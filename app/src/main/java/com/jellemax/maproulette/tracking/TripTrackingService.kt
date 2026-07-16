@@ -387,7 +387,7 @@ class TripTrackingService : Service() {
      */
     private fun resolvedMode(): TravelMode {
         val map = Settings.vehicleDevices.value
-        connectedVehicles.lastOrNull()?.let { addr -> map[addr]?.let { return it } }
+        connectedVehicles.lastOrNull()?.let { addr -> map[addr]?.let { return it.mode } }
         val s = _stats.value
         if (s != null && s.durationMs > WALK_MIN_JUDGE_MS) {
             val avg = if (s.durationMs > 0) s.distanceMeters / (s.durationMs / 1000.0) else 0.0
