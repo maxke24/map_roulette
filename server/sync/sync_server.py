@@ -31,8 +31,9 @@ Protocol
 
 Everything except /health and /auth/* needs `Authorization: Bearer <token>`.
 
-Merging stays append-only and idempotent:
-  - trips deduplicate on (user, startTimeMs);
+Merging is idempotent:
+  - trips key on (user, startTimeMs); a re-upload updates the stored copy, so
+    an edit like a corrected vehicle mode propagates instead of being ignored;
   - traces deduplicate on (user, sha256 of the line);
   - badges keep the *earliest* earnedAtMs seen for each id.
 
@@ -376,8 +377,12 @@ def do_sync(user, body):
         for trip in trips_in:
             if not isinstance(trip, dict) or "startTimeMs" not in trip:
                 raise HttpError(400, "trip missing startTimeMs")
+            # Upsert, not INSERT OR IGNORE: a trip re-uploaded with edited fields
+            # (e.g. a corrected vehicle mode) must replace the stored copy, or the
+            # stale row would come back in the merge and revert the edit.
             conn.execute(
-                "INSERT OR IGNORE INTO trips (user_id, start_ms, json) VALUES (?, ?, ?)",
+                "INSERT INTO trips (user_id, start_ms, json) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id, start_ms) DO UPDATE SET json = excluded.json",
                 (uid, int(trip["startTimeMs"]), json.dumps(trip)),
             )
         for line in traces_in:
