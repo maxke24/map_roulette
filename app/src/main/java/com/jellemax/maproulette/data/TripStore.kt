@@ -27,16 +27,25 @@ object TripStore {
 
     private const val FILE_NAME = "trips.json"
     private const val DELETED_FILE_NAME = "deleted_trips.json"
+    private const val EDITED_FILE_NAME = "edited_modes.json"
 
     fun save(context: Context, trip: Trip) {
         writeAll(context, listOf(trip) + load(context))
     }
 
-    /** Correct a misclassified trip's vehicle. Trips are keyed by their start
-     *  time, which is unique per recording. No-op if no such trip exists. */
+    /**
+     * Correct a misclassified trip's vehicle (keyed by unique start time). The
+     * override is also recorded locally and re-applied in [replaceRaw], so the
+     * /sync merge — which returns the server's union and replaces the local
+     * store — can't revert the edit before the server has accepted it. Once the
+     * server echoes the same mode back, the override clears itself.
+     */
     fun updateMode(context: Context, startTimeMs: Long, mode: TravelMode) {
         val trips = load(context)
         if (trips.none { it.startTimeMs == startTimeMs }) return
+        val overrides = modeOverrides(context)
+        overrides[startTimeMs] = mode.name
+        writeModeOverrides(context, overrides)
         writeAll(context, trips.map {
             if (it.startTimeMs == startTimeMs) it.copy(mode = mode) else it
         })
@@ -104,21 +113,38 @@ object TripStore {
         return if (f.exists()) f.readText() else "[]"
     }
 
-    /** Overwrite the store with a merged JSON array from the sync server, minus
-     *  any trips this device has deleted — otherwise the server's copy would
-     *  reappear on every sync. */
+    /**
+     * Overwrite the store with a merged JSON array from the sync server, after
+     * dropping deleted trips (tombstones) and re-applying local vehicle-mode
+     * edits — otherwise the server's copy would revert an edit or resurrect a
+     * deletion on every sync. A mode override clears itself once the server
+     * echoes the same value back, so it never masks a genuine later change.
+     */
     fun replaceRaw(context: Context, json: String) {
         val incoming = JSONArray(json) // validate before overwriting
         val tombstones = tombstones(context)
-        if (tombstones.isEmpty()) {
+        val overrides = modeOverrides(context)
+        if (tombstones.isEmpty() && overrides.isEmpty()) {
             file(context).writeText(json)
             return
         }
+        var overridesChanged = false
         val kept = JSONArray()
         for (i in 0 until incoming.length()) {
             val o = incoming.getJSONObject(i)
-            if (o.optLong("startTimeMs") !in tombstones) kept.put(o)
+            val start = o.optLong("startTimeMs")
+            if (start in tombstones) continue
+            overrides[start]?.let { wanted ->
+                if (o.optString("mode") == wanted) {
+                    overrides.remove(start) // server caught up; stop overriding
+                    overridesChanged = true
+                } else {
+                    o.put("mode", wanted) // keep the local correction
+                }
+            }
+            kept.put(o)
         }
+        if (overridesChanged) writeModeOverrides(context, overrides)
         file(context).writeText(kept.toString())
     }
 
@@ -137,6 +163,25 @@ object TripStore {
         val array = JSONArray()
         ids.forEach { array.put(it) }
         File(context.filesDir, DELETED_FILE_NAME).writeText(array.toString())
+    }
+
+    /** Local vehicle-mode corrections, startTimeMs → mode name, pending until
+     *  the server echoes them back. */
+    private fun modeOverrides(context: Context): MutableMap<Long, String> {
+        val f = File(context.filesDir, EDITED_FILE_NAME)
+        if (!f.exists()) return mutableMapOf()
+        return try {
+            val o = JSONObject(f.readText())
+            o.keys().asSequence().associateTo(mutableMapOf()) { it.toLong() to o.getString(it) }
+        } catch (e: Exception) {
+            mutableMapOf()
+        }
+    }
+
+    private fun writeModeOverrides(context: Context, map: Map<Long, String>) {
+        val o = JSONObject()
+        map.forEach { (start, mode) -> o.put(start.toString(), mode) }
+        File(context.filesDir, EDITED_FILE_NAME).writeText(o.toString())
     }
 
     private fun file(context: Context) = File(context.filesDir, FILE_NAME)
