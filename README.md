@@ -2,6 +2,15 @@
 
 Don't know where to drive? Set a radius, spin, get a random point on a real road, and go.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/spin-dark.png" width="260" alt="Spin screen, dark theme"><br><sub>Set a radius and spin — dark</sub></td>
+    <td align="center"><img src="docs/screenshots/map-light.png" width="260" alt="Map with fog of war, light theme"><br><sub>Map &amp; fog of war — light</sub></td>
+  </tr>
+</table>
+
 ## Features
 
 - **Modes**: walk (1–15 km), bike (1–30 km), car (5–100 km), and moto (30–400 km) — each

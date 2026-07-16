@@ -38,11 +38,12 @@ import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
 
-/** OpenFreeMap hosted vector styles: bright "liberty" by day, "dark" by night.
- *  Both are free and keyless — same privacy profile as the old raster tiles. */
+/** OpenFreeMap hosted vector styles, keyless and free. Neutral greys — "positron"
+ *  by day, "dark" by night — so the map sits quietly under the Graphite chrome
+ *  instead of the colourful "liberty" fighting the amber accent. */
 fun openFreeMapStyleUrl(darkTheme: Boolean): String =
     if (darkTheme) "https://tiles.openfreemap.org/styles/dark"
-    else "https://tiles.openfreemap.org/styles/liberty"
+    else "https://tiles.openfreemap.org/styles/positron"
 
 /** Source/layer ids. One GeoJSON source per overlay kind; [MapOverlays.render]
  *  swaps only the data so the layers themselves are set up once. */
@@ -169,7 +170,7 @@ class MapOverlays(private val style: Style, context: Context) {
     }
 
     companion object {
-        const val ROUTE_COLOR = "#00B3A4" // teal — Waze-family, our own identity
+        const val ROUTE_COLOR = "#E8B04B" // amber — the Graphite accent, on the map too
     }
 }
 

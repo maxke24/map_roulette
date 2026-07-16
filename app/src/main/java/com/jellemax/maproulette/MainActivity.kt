@@ -1,6 +1,5 @@
 package com.jellemax.maproulette
 
-import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -8,22 +7,19 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.ui.BadgesScreen
 import com.jellemax.maproulette.ui.FriendsScreen
 import com.jellemax.maproulette.ui.HistoryScreen
 import com.jellemax.maproulette.ui.MapScreen
+import com.jellemax.maproulette.ui.GraphiteDark
+import com.jellemax.maproulette.ui.GraphiteLight
 import com.jellemax.maproulette.ui.SettingsScreen
 import com.jellemax.maproulette.ui.isAppDarkTheme
 import org.maplibre.android.MapLibre
@@ -39,19 +35,11 @@ class MainActivity : ComponentActivity() {
         // OpenFreeMap tiles are keyless, so no token provider is needed.
         MapLibre.getInstance(this)
         setContent {
-            val context = LocalContext.current
             val theme by Settings.theme.collectAsStateWithLifecycle()
             val dark = isAppDarkTheme(theme)
-            // Material You dynamic color on Android 12+, static fallback below.
-            val colorScheme = when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && dark ->
-                    dynamicDarkColorScheme(context)
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-                    dynamicLightColorScheme(context)
-                dark -> darkColorScheme()
-                else -> lightColorScheme()
-            }
-            MaterialTheme(colorScheme = colorScheme) {
+            // The Graphite identity — a fixed amber-on-graphite scheme so the app
+            // (and the watch) share one look, instead of the wallpaper's colours.
+            MaterialTheme(colorScheme = if (dark) GraphiteDark else GraphiteLight) {
                 Surface { AppRoot() }
             }
         }

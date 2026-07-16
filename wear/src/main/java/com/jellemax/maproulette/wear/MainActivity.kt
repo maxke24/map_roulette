@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.wear.compose.material.Icon
+import androidx.wear.compose.material.Colors
 import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Text
 import com.google.android.gms.wearable.MessageClient
@@ -99,9 +100,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** Same amber-on-graphite identity as the phone, so the watch face matches. */
+private val WearColors = Colors(
+    primary = Color(0xFFE8B04B),
+    onPrimary = Color(0xFF241C08),
+    secondary = Color(0xFFC9B58A),
+    onSecondary = Color(0xFF2A2410),
+    background = Color(0xFF14170F),
+    onBackground = Color(0xFFEDE9DB),
+    surface = Color(0xFF24281D),
+    onSurface = Color(0xFFEDE9DB),
+    onSurfaceVariant = Color(0xFFB7AF98),
+    error = Color(0xFFE4533A),
+)
+
 @Composable
 private fun NavScreen(state: NavState?) {
-    MaterialTheme {
+    MaterialTheme(colors = WearColors) {
         Column(
             Modifier.fillMaxSize().padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
