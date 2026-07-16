@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONObject
 
 /**
  * App settings backed by SharedPreferences, exposed as StateFlows so the
@@ -51,6 +52,13 @@ object Settings {
     private val _tripMode = MutableStateFlow(TravelMode.CAR)
     val tripMode: StateFlow<TravelMode> = _tripMode
 
+    /** Bluetooth devices mapped to a vehicle: address → mode. When a mapped
+     *  device connects, the tracking service switches the trip mode to it, so a
+     *  drive auto-logs under the right vehicle. Empty = feature off. These are
+     *  Bluetooth Classic bonds (a Cardo intercom, a car's infotainment), not BLE. */
+    private val _vehicleDevices = MutableStateFlow<Map<String, TravelMode>>(emptyMap())
+    val vehicleDevices: StateFlow<Map<String, TravelMode>> = _vehicleDevices
+
     /** Opt in to the shared fog of war. Off by default, and the server only
      *  hands a friend's traces to someone who is also sharing theirs. */
     private val _shareFog = MutableStateFlow(false)
@@ -84,6 +92,25 @@ object Settings {
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
         _authToken.value = prefs.getString("auth_token", "") ?: ""
         _authUsername.value = prefs.getString("auth_username", "") ?: ""
+        _vehicleDevices.value = readVehicleDevices()
+    }
+
+    private fun readVehicleDevices(): Map<String, TravelMode> {
+        val raw = prefs.getString("vehicle_devices", null) ?: return emptyMap()
+        return runCatching {
+            val json = JSONObject(raw)
+            json.keys().asSequence().associateWith { TravelMode.of(json.getString(it)) }
+        }.getOrDefault(emptyMap())
+    }
+
+    /** Map [address] to [mode], or unmap it when [mode] is null. */
+    fun setVehicleForDevice(address: String, mode: TravelMode?) {
+        val next = _vehicleDevices.value.toMutableMap()
+        if (mode == null) next.remove(address) else next[address] = mode
+        _vehicleDevices.value = next
+        val json = JSONObject()
+        next.forEach { (addr, m) -> json.put(addr, m.name) }
+        prefs.edit().putString("vehicle_devices", json.toString()).apply()
     }
 
     fun setAuth(token: String, username: String) {

@@ -1,11 +1,17 @@
 package com.jellemax.maproulette.tracking
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
@@ -125,6 +131,12 @@ class TripTrackingService : Service() {
         private const val EXIT_GRACE_MS = 2 * 60_000L   // after IN_VEHICLE exit
         private const val STATIONARY_END_MS = 5 * 60_000L
         private const val MIN_AUTO_TRIP_METERS = 500.0
+        // A trip whose average pace stays under this, with no mapped vehicle
+        // connected, is a walk. Judged on average (not top) speed so one GPS
+        // spike can't upgrade a stroll, and only after enough of the trip to
+        // tell a real walk from the first slow seconds of a drive.
+        private const val WALK_AVG_MAX_MPS = 2.5           // ~9 km/h
+        private const val WALK_MIN_JUDGE_MS = 90_000L
         /** Motion sensors fire ~60x/s; publish stats at 5 Hz. */
         private const val SENSOR_EMIT_INTERVAL_MS = 200L
         /** Floor between boundary lookups, so a drive along a coastline (where
@@ -286,6 +298,116 @@ class TripTrackingService : Service() {
         sensorManager.unregisterListener(sensorListener)
     }
 
+    // --- Bluetooth vehicle auto-detect -------------------------------------
+    // Mapped Classic devices (Cardo, car infotainment) pick the trip mode: the
+    // most recently connected mapped device wins, falling back to the default
+    // when none is connected. Addresses of currently-connected mapped devices,
+    // newest last.
+    private val connectedVehicles = LinkedHashSet<String>()
+    private var btRegistered = false
+
+    private val btReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val device = deviceFrom(intent) ?: return
+            val address = try { device.address } catch (e: SecurityException) { return } ?: return
+            when (intent.action) {
+                BluetoothDevice.ACTION_ACL_CONNECTED ->
+                    if (Settings.vehicleDevices.value.containsKey(address)) {
+                        connectedVehicles.remove(address) // move to newest
+                        connectedVehicles.add(address)
+                        refreshTripMode()
+                    }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED ->
+                    if (connectedVehicles.remove(address)) refreshTripMode()
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun deviceFrom(intent: Intent): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        else intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+
+    /** True when we're allowed to touch bonded devices/connection state. Below
+     *  API 31 the normal BLUETOOTH permission is granted at install. */
+    private fun hasBtPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** Register the connect/disconnect watcher once, and seed it with whatever
+     *  is already connected (so it works if the app opens mid-drive). No-op
+     *  until permission is granted; retried on the next service command. */
+    private fun ensureBluetoothWatch() {
+        if (btRegistered || !hasBtPermission()) return
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(this, btReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        btRegistered = true
+        seedConnectedVehicles()
+    }
+
+    /** Ask the headset/A2DP profiles which mapped devices are connected right
+     *  now, since ACL broadcasts only fire on change, not for existing links. */
+    private fun seedConnectedVehicles() {
+        val map = Settings.vehicleDevices.value
+        if (map.isEmpty() || !hasBtPermission()) return
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        val listener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                try {
+                    proxy.connectedDevices.forEach { d ->
+                        if (map.containsKey(d.address)) {
+                            connectedVehicles.remove(d.address)
+                            connectedVehicles.add(d.address)
+                        }
+                    }
+                    if (connectedVehicles.isNotEmpty()) refreshTripMode()
+                } catch (e: SecurityException) {
+                    // permission revoked between the check and here; ignore
+                } finally {
+                    adapter.closeProfileProxy(profile, proxy)
+                }
+            }
+            override fun onServiceDisconnected(profile: Int) {}
+        }
+        adapter.getProfileProxy(this, listener, BluetoothProfile.HEADSET)
+        adapter.getProfileProxy(this, listener, BluetoothProfile.A2DP)
+    }
+
+    /**
+     * What this trip should be logged as. Priority: a connected mapped device
+     * decides (Cardo → moto, infotainment → car, walking earbuds → walk); else,
+     * once we have enough of the trip to judge, a sustained walking pace with
+     * nothing mapped connected means a walk; else the spin tab's mode. The tab
+     * itself is never changed here — classification is the trip's, not the UI's.
+     */
+    private fun resolvedMode(): TravelMode {
+        val map = Settings.vehicleDevices.value
+        connectedVehicles.lastOrNull()?.let { addr -> map[addr]?.let { return it } }
+        val s = _stats.value
+        if (s != null && s.durationMs > WALK_MIN_JUDGE_MS) {
+            val avg = if (s.durationMs > 0) s.distanceMeters / (s.durationMs / 1000.0) else 0.0
+            if (avg < WALK_AVG_MAX_MPS) return TravelMode.WALK
+        }
+        return Settings.tripMode.value
+    }
+
+    /** Retag the running trip if its mode should change (device connected/left,
+     *  or a walk revealed itself by pace). Restarts motion sensors to match. */
+    private fun refreshTripMode() {
+        val mode = resolvedMode()
+        if (_stats.value != null && _stats.value?.mode != mode) {
+            _stats.update { it?.copy(mode = mode) }
+            stopMotionSensors()
+            startMotionSensors(mode)
+            updateNotification()
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Settings.init(this)
         createChannel()
@@ -319,6 +441,7 @@ class TripTrackingService : Service() {
 
         ensureLocationUpdates()
         registerActivityTransitions()
+        ensureBluetoothWatch()
         return START_STICKY
     }
 
@@ -335,9 +458,10 @@ class TripTrackingService : Service() {
         currentLeanDeg = 0.0; maxLeanDeg = 0.0
         currentG = 0.0; maxG = 0.0
         lastMovingMs = System.currentTimeMillis()
-        // An auto-started trip has no other way to know what it is riding on.
-        val mode = Settings.tripMode.value
-        _stats.value = TripStats(startTimeMs = startTimeMs, mode = mode)
+        // Classify by connected device / pace / tab; refined live as the trip runs.
+        _stats.value = TripStats(startTimeMs = startTimeMs)
+        val mode = resolvedMode()
+        _stats.value = _stats.value?.copy(mode = mode)
         ensureLocationUpdates()
         startMotionSensors(mode)
         updateNotification()
@@ -639,6 +763,8 @@ class TripTrackingService : Service() {
                 topSpeedMps = maxOf(it.topSpeedMps, speed),
             )
         }
+        // Now that pace is updated, a slow trip may reveal itself as a walk.
+        refreshTripMode()
     }
 
     private fun speedOf(location: Location): Double {
@@ -706,6 +832,10 @@ class TripTrackingService : Service() {
     override fun onDestroy() {
         if (::fusedClient.isInitialized) {
             fusedClient.removeLocationUpdates(locationCallback)
+        }
+        if (btRegistered) {
+            runCatching { unregisterReceiver(btReceiver) }
+            btRegistered = false
         }
         endTrip()
         flushTrace()

@@ -1,5 +1,9 @@
 package com.jellemax.maproulette.ui
 
+import android.Manifest
+import android.bluetooth.BluetoothManager
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -39,8 +43,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.BuildConfig
+import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.data.ConfigFile
 import com.jellemax.maproulette.data.RoutingServer
 import com.jellemax.maproulette.data.ServerConfig
@@ -130,6 +136,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                     )
                 }
             }
+
+            VehicleSection()
 
             SettingsSection("Navigation") {
                 Row(
@@ -377,6 +385,95 @@ private fun ConfigFileSection() {
             }) { Text("Import config") }
         }
         status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    }
+}
+
+/**
+ * Map paired Bluetooth (Classic) devices to a vehicle. When one connects, the
+ * tracking service logs the trip under that vehicle — a Cardo for the moto, the
+ * car's infotainment for driving, walking earbuds for a walk. No scanning, so
+ * it needs BLUETOOTH_CONNECT but never location.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VehicleSection() {
+    val context = LocalContext.current
+    val mapping by Settings.vehicleDevices.collectAsStateWithLifecycle()
+    var hasPerm by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.BLUETOOTH_CONNECT,
+                ) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val permLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        hasPerm = granted
+        if (granted) TripTrackingService.refresh(context)
+    }
+    val bonded = remember(hasPerm) {
+        if (!hasPerm) emptyList()
+        else try {
+            context.getSystemService(BluetoothManager::class.java)?.adapter
+                ?.bondedDevices
+                ?.sortedBy { runCatching { it.name }.getOrNull() ?: it.address }
+                ?: emptyList()
+        } catch (e: SecurityException) {
+            emptyList()
+        }
+    }
+
+    // Ignore + one option per mode, in a single choice row per device.
+    val options: List<Pair<String, TravelMode?>> =
+        listOf("Ignore" to null) + TravelMode.entries.map { it.label to it }
+
+    SettingsSection("Vehicles") {
+        Text(
+            "Match a paired Bluetooth device to a vehicle. When it's connected, " +
+                "trips log under that vehicle automatically — and a walking device " +
+                "(or no connection at a walking pace) logs as a walk.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (!hasPerm) {
+            Text(
+                "Grant Bluetooth access to list your paired devices.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = {
+                permLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            }) { Text("Allow Bluetooth") }
+            return@SettingsSection
+        }
+        if (bonded.isEmpty()) {
+            Text(
+                "No paired Bluetooth devices found. Pair your Cardo / car / earbuds " +
+                    "in Android's Bluetooth settings first.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            return@SettingsSection
+        }
+        bonded.forEach { device ->
+            val address = device.address
+            val name = runCatching { device.name }.getOrNull() ?: address
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(name, style = MaterialTheme.typography.bodyLarge)
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    options.forEachIndexed { index, (label, mode) ->
+                        SegmentedButton(
+                            selected = mapping[address] == mode,
+                            onClick = {
+                                Settings.setVehicleForDevice(address, mode)
+                                TripTrackingService.refresh(context)
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index, options.size),
+                            label = { Text(label, maxLines = 1) },
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

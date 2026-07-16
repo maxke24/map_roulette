@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.RectF
+import android.media.AudioManager
+import android.media.ToneGenerator
 import java.io.IOException
 import android.net.Uri
 import android.os.Build
@@ -36,6 +38,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.EmojiEvents
@@ -123,6 +126,7 @@ import com.jellemax.maproulette.data.RouteResult
 import com.jellemax.maproulette.data.RoutingServer
 import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.Settings
+import com.jellemax.maproulette.data.SpeedCameras
 import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TraceStore
 import com.jellemax.maproulette.data.TravelMode
@@ -155,6 +159,7 @@ private val DIRECTION_NAMES = listOf("North", "North-east", "East", "South-east"
 
 private val TravelMode.icon: ImageVector
     get() = when (this) {
+        TravelMode.WALK -> Icons.AutoMirrored.Filled.DirectionsWalk
         TravelMode.BIKE -> Icons.AutoMirrored.Filled.DirectionsBike
         TravelMode.MOTO -> Icons.Default.TwoWheeler
         TravelMode.CAR -> Icons.Default.DirectionsCar
@@ -189,6 +194,25 @@ private const val FIT_PADDING_PX = 140
 // 80 km/h from being yanked out from under you mid-gesture.
 private const val CAM_RESUME_SPEED_MPS = 3.0
 private const val CAM_RESUME_QUIET_MS = 8_000L
+
+// How far ahead a speed camera triggers the over-speed chime. ~400 m is ~12 s
+// of warning at motorway speed — time to ease off before the camera.
+private const val CAMERA_WARN_METERS = 400.0
+
+// How close to a section's device node counts as passing it, for entering and
+// leaving a trajectcontrole average-speed measurement.
+private const val SECTION_GATE_METERS = 60.0
+
+/** Straight-line span of a section, its longest device-to-device distance —
+ *  the yardstick for deciding we've overshot the far end. */
+private fun sectionLengthMeters(devices: List<LatLon>): Double {
+    var max = 0.0
+    for (i in devices.indices) for (j in i + 1 until devices.size) {
+        val d = RoadRoulette.distanceMeters(devices[i], devices[j])
+        if (d > max) max = d
+    }
+    return max
+}
 
 /** One color per spin candidate, so the pin on the map and the row in the card
  *  are recognizably the same place. Kept clear of the blue radius circle, the
@@ -312,6 +336,12 @@ fun MapScreen(
     var speedLimitWaysCenter by remember { mutableStateOf<LatLon?>(null) }
     var speedLimitFetchMs by remember { mutableLongStateOf(0L) }
     var speedLimitMisses by remember { mutableIntStateOf(0) }
+    var speedCameras by remember { mutableStateOf<List<SpeedCameras.Camera>>(emptyList()) }
+    var speedSections by remember { mutableStateOf<List<SpeedCameras.Section>>(emptyList()) }
+    // Non-null only while driving through a trajectcontrole: the running average
+    // speed since entering it, and the posted limit it's judged against.
+    var sectionAvgKmh by remember { mutableStateOf<Double?>(null) }
+    var sectionLimitKmh by remember { mutableStateOf<Double?>(null) }
 
     // Where the camera is heading. GPS delivers a fix about once a second; the
     // frame loop further down eases the map toward these targets every frame,
@@ -682,6 +712,126 @@ fun MapScreen(
         }
     }
 
+    // Speed cameras + trajectcontrole sections from Overpass (OSM). Prefetched
+    // for a wide circle, refreshed only as you near the edge of what you hold,
+    // so there's no request per fix. A null result is a network blip: keep the
+    // markers we have and let the throttle retry, instead of flickering them off.
+    LaunchedEffect(Unit) {
+        var center: LatLon? = null
+        var lastFetchMs = 0L
+        TripTrackingService.lastFix.collect { fix ->
+            fix ?: return@collect
+            val pos = LatLon(fix.lat, fix.lon)
+            val fromCenter = center?.let { RoadRoulette.distanceMeters(it, pos) }
+                ?: Double.MAX_VALUE
+            val now = System.currentTimeMillis()
+            if (fromCenter > SpeedCameras.PREFETCH_RADIUS_M - 1000.0 &&
+                now - lastFetchMs > 15_000
+            ) {
+                lastFetchMs = now
+                val result = withContext(Dispatchers.IO) { SpeedCameras.near(pos) }
+                if (result != null) {
+                    speedCameras = result.cameras
+                    speedSections = result.sections
+                    center = pos
+                }
+            }
+        }
+    }
+
+    // Push camera markers to the map. Separate from the main overlay render
+    // because cameras change on the prefetch cadence, not per drawable-state flip.
+    LaunchedEffect(mapOverlays, speedCameras) {
+        mapOverlays?.setCameras(speedCameras)
+    }
+
+    // Chime when a camera lies ahead, close, and we're over the posted limit —
+    // the one case worth interrupting for. One chime per camera: warnedAt holds
+    // the camera we last sounded for and clears once it's behind us, re-arming
+    // for the next. Silent when the limit is unknown: we can't judge "too fast".
+    val speedCamerasRef = rememberUpdatedState(speedCameras)
+    val ambientLimitRef = rememberUpdatedState(ambientSpeedLimitKmh)
+    val navProgressRef = rememberUpdatedState(navProgress)
+    val toneGen = remember {
+        runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 90) }.getOrNull()
+    }
+    DisposableEffect(Unit) { onDispose { toneGen?.release() } }
+    LaunchedEffect(Unit) {
+        var warnedAt: LatLon? = null
+        TripTrackingService.lastFix.collect { fix ->
+            fix ?: return@collect
+            val pos = LatLon(fix.lat, fix.lon)
+            val heading = fix.bearingDeg?.toDouble()
+            val ahead = speedCamerasRef.value.filter { cam ->
+                RoadRoulette.distanceMeters(pos, cam.at) <= CAMERA_WARN_METERS &&
+                    (heading == null ||
+                        RoadRoulette.withinWedge(pos, cam.at, heading, 45.0))
+            }.minByOrNull { RoadRoulette.distanceMeters(pos, it.at) }
+            if (ahead == null) {
+                warnedAt = null
+                return@collect
+            }
+            val limit = navProgressRef.value?.speedLimitKmh ?: ambientLimitRef.value
+            val tooFast = limit != null && fix.speedMps * 3.6 > limit + 3.0
+            if (tooFast && ahead.at != warnedAt) {
+                toneGen?.startTone(ToneGenerator.TONE_PROP_BEEP2, 400)
+                warnedAt = ahead.at
+            }
+        }
+    }
+
+    // Average speed through a trajectcontrole. Enter near a section's device
+    // node, then integrate GPS distance over elapsed time until we reach the
+    // far device (or overshoot / time out). The average is what the section
+    // actually measures, so it's the number worth seeing while inside one.
+    val speedSectionsRef = rememberUpdatedState(speedSections)
+    LaunchedEffect(Unit) {
+        var active: SpeedCameras.Section? = null
+        var entryMs = 0L
+        var accMeters = 0.0
+        var last: LatLon? = null
+        TripTrackingService.lastFix.collect { fix ->
+            fix ?: return@collect
+            val pos = LatLon(fix.lat, fix.lon)
+            val now = System.currentTimeMillis()
+            val current = active
+            if (current == null) {
+                val entered = speedSectionsRef.value.firstOrNull { s ->
+                    s.devices.any { RoadRoulette.distanceMeters(pos, it) < SECTION_GATE_METERS }
+                }
+                if (entered != null && fix.speedMps > 2.0) {
+                    active = entered
+                    entryMs = now
+                    accMeters = 0.0
+                    last = pos
+                    sectionAvgKmh = null
+                    sectionLimitKmh = entered.maxspeedKmh
+                }
+            } else {
+                last?.let { accMeters += RoadRoulette.distanceMeters(it, pos) }
+                last = pos
+                val elapsedHours = (now - entryMs) / 3_600_000.0
+                if (elapsedHours > 0 && accMeters > 20.0) {
+                    sectionAvgKmh = (accMeters / 1000.0) / elapsedHours
+                }
+                // Sections can have intermediate device nodes; only treat passing
+                // one as the end once we've covered most of the span, so an early
+                // point doesn't stop the measurement short.
+                val length = sectionLengthMeters(current.devices)
+                val reachedEnd = accMeters > maxOf(150.0, length * 0.8) &&
+                    current.devices.any { RoadRoulette.distanceMeters(pos, it) < SECTION_GATE_METERS }
+                val overshot = accMeters > length * 1.4 + 400.0
+                val timedOut = now - entryMs > 30 * 60_000L
+                if (reachedEnd || overshot || timedOut) {
+                    active = null
+                    last = null
+                    sectionAvgKmh = null
+                    sectionLimitKmh = null
+                }
+            }
+        }
+    }
+
     // Each fix only moves the targets; nothing touches the map here. This is
     // what lets the camera loop below run uninterrupted — the old code drove
     // animateTo() from an effect keyed on liveFix, so every fix cancelled the
@@ -966,6 +1116,8 @@ fun MapScreen(
                             speedKmh = displaySpeedKmh,
                             limitKmh = if (navigating) navProgress?.speedLimitKmh
                                 else ambientSpeedLimitKmh,
+                            averageKmh = sectionAvgKmh,
+                            averageLimitKmh = sectionLimitKmh,
                         )
                     }
                 }
@@ -1536,13 +1688,24 @@ private fun CollapsedSpinBar(
  *  5 km/h over. Sized to be read at a glance, not to dominate the map — the trip
  *  card no longer repeats the number underneath it. */
 @Composable
-private fun SpeedHud(speedKmh: Double, limitKmh: Double?, modifier: Modifier = Modifier) {
+private fun SpeedHud(
+    speedKmh: Double,
+    limitKmh: Double?,
+    averageKmh: Double? = null,
+    averageLimitKmh: Double? = null,
+    modifier: Modifier = Modifier,
+) {
     val speeding = limitKmh != null && speedKmh > limitKmh + 5
     Row(
         modifier,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Inside a trajectcontrole: the running average is what the section
+        // measures, so it sits front and centre and turns red once it's over.
+        averageKmh?.let { avg ->
+            SectionAverageChip(avg, averageLimitKmh)
+        }
         Crossfade(targetState = limitKmh, animationSpec = tween(300), label = "speedLimit") {
             SpeedLimitSign(it, size = 48.dp)
         }
@@ -1574,6 +1737,40 @@ private fun SpeedHud(speedKmh: Double, limitKmh: Double?, modifier: Modifier = M
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+/** Running average speed through a trajectcontrole, next to the live speed.
+ *  Red once the average is over the section's posted limit — that's the number
+ *  the camera pair is actually about to fine you on. */
+@Composable
+private fun SectionAverageChip(averageKmh: Double, limitKmh: Double?, modifier: Modifier = Modifier) {
+    val over = limitKmh != null && averageKmh > limitKmh
+    Card(
+        modifier = modifier,
+        shape = CircleShape,
+        colors = CardDefaults.cardColors(
+            containerColor = if (over) MaterialTheme.colorScheme.errorContainer
+                else MaterialTheme.colorScheme.tertiaryContainer,
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+    ) {
+        Column(
+            Modifier.size(72.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            val onColor = if (over) MaterialTheme.colorScheme.onErrorContainer
+                else MaterialTheme.colorScheme.onTertiaryContainer
+            Text(
+                "Ø %.0f".format(averageKmh),
+                fontSize = 26.sp,
+                lineHeight = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = onColor,
+            )
+            Text("avg km/h", style = MaterialTheme.typography.labelSmall, color = onColor)
         }
     }
 }

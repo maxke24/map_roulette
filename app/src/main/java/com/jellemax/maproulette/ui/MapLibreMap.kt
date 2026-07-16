@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.jellemax.maproulette.R
 import com.jellemax.maproulette.data.LatLon
+import com.jellemax.maproulette.data.SpeedCameras
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
@@ -51,8 +52,10 @@ private const val SRC_ROUTE = "mr-route"
 private const val SRC_CANDIDATES = "mr-candidates"
 private const val SRC_DEST = "mr-dest"
 private const val SRC_POSITION = "mr-position"
+private const val SRC_CAMERAS = "mr-cameras"
 private const val IMG_DEST = "mr-img-dest"
 private const val IMG_POSITION = "mr-img-position"
+private const val IMG_CAMERA = "mr-img-camera"
 const val LAYER_CANDIDATES = "mr-candidates-dot"
 
 /**
@@ -70,7 +73,10 @@ class MapOverlays(private val style: Style, context: Context) {
         ContextCompat.getDrawable(context, R.drawable.ic_map_dot)?.let {
             style.addImage(IMG_POSITION, it.toBitmap())
         }
-        listOf(SRC_REACH, SRC_WEDGE, SRC_ROUTE, SRC_CANDIDATES, SRC_DEST, SRC_POSITION)
+        ContextCompat.getDrawable(context, R.drawable.ic_map_camera)?.let {
+            style.addImage(IMG_CAMERA, it.toBitmap())
+        }
+        listOf(SRC_REACH, SRC_WEDGE, SRC_ROUTE, SRC_CANDIDATES, SRC_DEST, SRC_POSITION, SRC_CAMERAS)
             .forEach { style.addSource(GeoJsonSource(it)) }
 
         // Bottom-to-top: fills, then the route (dark casing under the colored
@@ -96,6 +102,11 @@ class MapOverlays(private val style: Style, context: Context) {
         style.addLayer(SymbolLayer("mr-dest", SRC_DEST).withProperties(
             PropertyFactory.iconImage(IMG_DEST), PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
             PropertyFactory.iconAllowOverlap(true), PropertyFactory.iconIgnorePlacement(true)))
+        // Speed cameras: static markers fed by the prefetch loop. Sit under the
+        // candidate dots so a spin result is never hidden behind a camera.
+        style.addLayer(SymbolLayer("mr-cameras", SRC_CAMERAS).withProperties(
+            PropertyFactory.iconImage(IMG_CAMERA),
+            PropertyFactory.iconAllowOverlap(true), PropertyFactory.iconIgnorePlacement(true)))
         // Candidates as colored discs with a white ring; the color matches the
         // card row, and a tap is resolved by querying this layer.
         style.addLayer(CircleLayer(LAYER_CANDIDATES, SRC_CANDIDATES).withProperties(
@@ -107,6 +118,13 @@ class MapOverlays(private val style: Style, context: Context) {
 
     private fun setData(sourceId: String, fc: FeatureCollection) {
         (style.getSource(sourceId) as? GeoJsonSource)?.setGeoJson(fc)
+    }
+
+    /** Replace the speed-camera markers. Fed by the prefetch loop, not [render],
+     *  because cameras refresh only as you near the edge of the fetched area. */
+    fun setCameras(cameras: List<SpeedCameras.Camera>) {
+        setData(SRC_CAMERAS, FeatureCollection.fromFeatures(
+            cameras.map { Feature.fromGeometry(Point.fromLngLat(it.at.lon, it.at.lat)) }))
     }
 
     /** Push the current world state to the overlay sources. Pass [reachMeters]

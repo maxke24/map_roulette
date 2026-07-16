@@ -28,8 +28,20 @@ object TripStore {
     private const val FILE_NAME = "trips.json"
 
     fun save(context: Context, trip: Trip) {
-        val trips = load(context).toMutableList()
-        trips.add(0, trip)
+        writeAll(context, listOf(trip) + load(context))
+    }
+
+    /** Correct a misclassified trip's vehicle. Trips are keyed by their start
+     *  time, which is unique per recording. No-op if no such trip exists. */
+    fun updateMode(context: Context, startTimeMs: Long, mode: TravelMode) {
+        val trips = load(context)
+        if (trips.none { it.startTimeMs == startTimeMs }) return
+        writeAll(context, trips.map {
+            if (it.startTimeMs == startTimeMs) it.copy(mode = mode) else it
+        })
+    }
+
+    private fun writeAll(context: Context, trips: List<Trip>) {
         val array = JSONArray()
         for (t in trips) {
             array.put(

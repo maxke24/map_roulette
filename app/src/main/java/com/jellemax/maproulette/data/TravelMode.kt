@@ -23,6 +23,14 @@ enum class TravelMode(
     /** Cornering and braking g. Meaningful under an engine, noise on a bicycle. */
     val tracksGForce: Boolean = false,
 ) {
+    WALK(
+        label = "Walk",
+        minKm = 1f, maxKm = 15f, defaultKm = 3f,
+        highwayRegex = "^(footway|pedestrian|path|living_street|residential|" +
+            "unclassified|track|steps)$",
+        gmapsMode = "w",
+        ghProfile = "foot",
+    ),
     BIKE(
         label = "Bike",
         minKm = 1f, maxKm = 30f, defaultKm = 10f,
