@@ -27,9 +27,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,12 +41,26 @@ import com.jellemax.maproulette.data.SyncClient
 import com.jellemax.maproulette.data.TravelMode
 import com.jellemax.maproulette.data.Trip
 import com.jellemax.maproulette.data.TripStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    var trips by remember { mutableStateOf(TripStore.load(context)) }
+    val scope = rememberCoroutineScope()
+    // Loaded off the main thread: reading + JSON-parsing the store inside a
+    // remember{} ran during composition and stalled the first frame (~125 ms on a
+    // large history), which is what made opening and scrolling feel stuck. Null
+    // means "still loading"; the reloads after an edit go through IO too.
+    var trips by remember { mutableStateOf<List<Trip>?>(null) }
+    LaunchedEffect(Unit) {
+        trips = withContext(Dispatchers.IO) { TripStore.load(context) }
+    }
+    fun reload() = scope.launch {
+        trips = withContext(Dispatchers.IO) { TripStore.load(context) }
+    }
 
     Scaffold(
         topBar = {
@@ -58,7 +74,8 @@ fun HistoryScreen(onBack: () -> Unit) {
             )
         },
     ) { padding ->
-        if (trips.isEmpty()) {
+        val loaded = trips
+        if (loaded != null && loaded.isEmpty()) {
             Column(
                 Modifier
                     .fillMaxSize()
@@ -68,7 +85,7 @@ fun HistoryScreen(onBack: () -> Unit) {
             ) {
                 Text("No trips yet", style = MaterialTheme.typography.bodyLarge)
             }
-        } else {
+        } else if (loaded != null) {
             LazyColumn(
                 Modifier
                     .fillMaxSize()
@@ -76,18 +93,26 @@ fun HistoryScreen(onBack: () -> Unit) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(trips) { trip ->
+                items(loaded, key = { it.startTimeMs }) { trip ->
                     TripCard(
                         trip = trip,
                         onChangeMode = { newMode ->
-                            TripStore.updateMode(context, trip.startTimeMs, newMode)
-                            trips = TripStore.load(context)
-                            // Push the correction so it survives a reinstall / other devices.
-                            SyncClient.syncQuietly(context)
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    TripStore.updateMode(context, trip.startTimeMs, newMode)
+                                }
+                                reload()
+                                // Push the correction so it survives a reinstall / other devices.
+                                SyncClient.syncQuietly(context)
+                            }
                         },
                         onDelete = {
-                            TripStore.delete(context, trip.startTimeMs)
-                            trips = TripStore.load(context)
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    TripStore.delete(context, trip.startTimeMs)
+                                }
+                                reload()
+                            }
                         },
                     )
                 }

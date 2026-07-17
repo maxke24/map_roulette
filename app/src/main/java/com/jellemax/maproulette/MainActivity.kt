@@ -20,6 +20,7 @@ import com.jellemax.maproulette.ui.HistoryScreen
 import com.jellemax.maproulette.ui.MapScreen
 import com.jellemax.maproulette.ui.GraphiteDark
 import com.jellemax.maproulette.ui.GraphiteLight
+import com.jellemax.maproulette.ui.SavedPlacesScreen
 import com.jellemax.maproulette.ui.SettingsScreen
 import com.jellemax.maproulette.ui.isAppDarkTheme
 import org.maplibre.android.MapLibre
@@ -46,7 +47,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { MAP, HISTORY, BADGES, FRIENDS, SETTINGS }
+private enum class Screen { MAP, HISTORY, BADGES, FRIENDS, SETTINGS, SAVED }
 
 @Composable
 private fun AppRoot() {
@@ -56,11 +57,13 @@ private fun AppRoot() {
         Screen.BADGES -> BadgesScreen(onBack = { screen = Screen.MAP })
         Screen.FRIENDS -> FriendsScreen(onBack = { screen = Screen.MAP })
         Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.MAP })
+        Screen.SAVED -> SavedPlacesScreen(onBack = { screen = Screen.MAP })
         Screen.MAP -> MapScreen(
             onOpenHistory = { screen = Screen.HISTORY },
             onOpenBadges = { screen = Screen.BADGES },
             onOpenFriends = { screen = Screen.FRIENDS },
             onOpenSettings = { screen = Screen.SETTINGS },
+            onOpenSavedPlaces = { screen = Screen.SAVED },
         )
     }
 }

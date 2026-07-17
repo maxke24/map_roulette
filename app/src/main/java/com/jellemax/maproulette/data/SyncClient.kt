@@ -50,6 +50,7 @@ object SyncClient {
             .put("trips", JSONArray(TripStore.rawJson(context)))
             .put("traces", JSONArray(TraceStore.rawLines(context)))
             .put("badges", JSONObject(BadgeStore.rawJson(context)))
+            .put("savedPlaces", JSONArray(SavedPlaces.rawJson(context)))
             .put("stats", stats.toJson())
             .put("shareFog", Settings.shareFog.value)
 
@@ -62,6 +63,10 @@ object SyncClient {
         TraceStore.replaceLines(
             context, (0 until traces.length()).map { traces.getString(it) })
         BadgeStore.replaceRaw(context, badges.toString())
+        // Absent on an older server: leave the local shortcuts untouched.
+        merged.optJSONArray("savedPlaces")?.let {
+            SavedPlaces.replaceFromServer(context, it.toString())
+        }
         return SyncResult(trips.length(), traces.length(), badges.length())
     }
 }

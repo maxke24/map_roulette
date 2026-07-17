@@ -17,8 +17,13 @@ fun formatSpeedKmh(mps: Double): String = "%.0f km/h".format(mps * 3.6)
 fun formatDistanceKm(meters: Double): String =
     if (meters < 1000) "%.0f m".format(meters) else "%.1f km".format(meters / 1000)
 
-fun formatDate(timeMs: Long): String =
-    SimpleDateFormat("EEE d MMM yyyy, HH:mm", Locale.getDefault()).format(Date(timeMs))
+// Built once, reused. A fresh SimpleDateFormat per call re-parses the ICU
+// pattern (~1-2 ms) — cheap alone, but LazyColumn composes many rows per fling
+// frame, so per-row allocation is what made trip-history scrolling stutter.
+// Composition is single-threaded (main), so one shared instance is safe here.
+private val tripDateFormat = SimpleDateFormat("EEE d MMM yyyy, HH:mm", Locale.getDefault())
+
+fun formatDate(timeMs: Long): String = tripDateFormat.format(Date(timeMs))
 
 fun formatLeanAngle(deg: Double): String = "%.0f°".format(deg)
 

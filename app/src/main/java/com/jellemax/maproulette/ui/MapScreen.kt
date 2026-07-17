@@ -19,6 +19,8 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +41,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.EmojiEvents
@@ -60,6 +63,8 @@ import androidx.compose.material.icons.filled.TwoWheeler
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -124,6 +129,8 @@ import com.jellemax.maproulette.data.RoadRoulette
 import com.jellemax.maproulette.data.RoundTripPlanner
 import com.jellemax.maproulette.data.RouteResult
 import com.jellemax.maproulette.data.RoutingServer
+import com.jellemax.maproulette.data.SavedPlace
+import com.jellemax.maproulette.data.SavedPlaces
 import com.jellemax.maproulette.data.ServerConfig
 import com.jellemax.maproulette.data.Settings
 import com.jellemax.maproulette.data.SpeedCameras
@@ -183,6 +190,14 @@ private fun smoothBearing(current: Float?, target: Float, alpha: Float = 0.3f): 
 private const val CAM_POS_TAU = 0.35
 private const val CAM_BEARING_TAU = 0.5
 private const val CAM_ZOOM_TAU = 1.2
+
+// Below these, an eased camera step isn't worth a redraw: ~0.2 m of pan (well
+// sub-pixel at driving zooms), a hair of zoom, a tenth of a degree of rotation.
+// Once the ease settles inside all three, setCamera is skipped and the map —
+// and the fog view riding on its camera-move callback — goes quiet.
+private const val CAM_POS_EPS_DEG = 2e-6
+private const val CAM_ZOOM_EPS = 2e-3
+private const val CAM_BEARING_EPS_DEG = 0.1f
 
 // Padding kept around a fitted route/candidate spread so pins and the trip card
 // don't sit against the screen edge.
@@ -282,9 +297,14 @@ fun MapScreen(
     onOpenBadges: () -> Unit,
     onOpenFriends: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSavedPlaces: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { SavedPlaces.ensureLoaded(context) }
+    val savedPlaces by SavedPlaces.places.collectAsStateWithLifecycle()
+    // Non-null while a name is being entered for the current dropped/destination pin.
+    var savePinTarget by remember { mutableStateOf<LatLon?>(null) }
 
     // Persisted, because the tracking service reads it too: an auto-detected
     // trip has no other way to know whether it is a ride or a drive.
@@ -421,7 +441,7 @@ fun MapScreen(
     LaunchedEffect(darkTheme, mapLibreMap) {
         val map = mapLibreMap ?: return@LaunchedEffect
         map.setStyle(Style.Builder().fromUri(openFreeMapStyleUrl(darkTheme))) { style ->
-            mapOverlays = MapOverlays(style, context)
+            mapOverlays = MapOverlays(style, context, darkTheme)
             fogView.map = map
             if (mapView.indexOfChild(fogView) < 0) {
                 mapView.addView(fogView, android.view.ViewGroup.LayoutParams(
@@ -868,6 +888,14 @@ fun MapScreen(
         var lon = start.lon
         var bearing = camTargetBearing ?: 0f
         var zoom = map.cameraPosition.zoom.takeIf { it > 1.0 } ?: camTargetZoom
+        // Last values actually pushed to the map. Comparing against these lets us
+        // skip setCamera once the ease has settled: an unchanged camera keeps the
+        // map idle, which is what stops the per-frame GL redraw + fog invalidate
+        // from burning the whole frame budget while stationary or cruising steady.
+        var appliedLat = Double.NaN
+        var appliedLon = 0.0
+        var appliedZoom = 0.0
+        var appliedBearing = 0f
         var lastNs = withFrameNanos { it }
         while (true) {
             val ns = withFrameNanos { it }
@@ -889,8 +917,24 @@ fun MapScreen(
             // Heading-up while moving: MapLibre bearing points the camera along
             // travel, so the road you're on runs up the screen. The camera-move
             // listener redraws the fog; the position dot is world-fixed and rides
-            // along on its own.
-            setCamera(map, lat, lon, zoom, bearing)
+            // along on its own. Only pushed when the change since the last push is
+            // visible (sub-pixel/sub-degree moves are dropped), so a settled camera
+            // does no work at all.
+            var dBearing = (bearing - appliedBearing) % 360f
+            if (dBearing > 180f) dBearing -= 360f
+            if (dBearing < -180f) dBearing += 360f
+            val moved = appliedLat.isNaN() ||
+                abs(lat - appliedLat) > CAM_POS_EPS_DEG ||
+                abs(lon - appliedLon) > CAM_POS_EPS_DEG ||
+                abs(zoom - appliedZoom) > CAM_ZOOM_EPS ||
+                abs(dBearing) > CAM_BEARING_EPS_DEG
+            if (moved) {
+                setCamera(map, lat, lon, zoom, bearing)
+                appliedLat = lat
+                appliedLon = lon
+                appliedZoom = zoom
+                appliedBearing = bearing
+            }
         }
     }
 
@@ -1083,6 +1127,7 @@ fun MapScreen(
                     onOpenBadges = onOpenBadges,
                     onOpenFriends = onOpenFriends,
                     onOpenSettings = onOpenSettings,
+                    onOpenSavedPlaces = onOpenSavedPlaces,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .statusBarsPadding()
@@ -1124,6 +1169,25 @@ fun MapScreen(
 
                 stats?.let { ActiveTripCard(it) }
 
+                // Shortcut chips: one-tap a saved place to set it as destination,
+                // or save the pin you just dropped. Hidden while navigating.
+                if (!navigating && (savedPlaces.isNotEmpty() || destination != null)) {
+                    ShortcutChips(
+                        places = savedPlaces,
+                        canSavePin = destination != null,
+                        onPick = { p ->
+                            destination = p.location
+                            destinationName = p.name
+                            route = null
+                            camSuspended = true
+                            lastGestureMs = System.currentTimeMillis()
+                            mapLibreMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(
+                                LatLng(p.location.lat, p.location.lon), 14.0), 600)
+                        },
+                        onSavePin = { destination?.let { savePinTarget = it } },
+                    )
+                }
+
                 if (navigating) NavigationBottomBar(
                     progress = navProgress,
                     offRoute = (navProgress?.offRouteMeters ?: 0.0) > 60,
@@ -1140,10 +1204,10 @@ fun MapScreen(
                     onSpin = { if (spinning) spinJob?.cancel() else spin() },
                     onExpand = { settingsCollapsed = false },
                 ) else Card(
+                    modifier = Modifier.glassBorder(MaterialTheme.shapes.extraLarge),
                     shape = MaterialTheme.shapes.extraLarge,
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    ),
+                    colors = glassCardColors(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 ) {
                     Column(Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1303,6 +1367,17 @@ fun MapScreen(
         }
     }
 
+    savePinTarget?.let { target ->
+        SavePinDialog(
+            suggestedName = destinationName?.takeIf { it != "Dropped pin" } ?: "",
+            onSave = { name ->
+                SavedPlaces.add(context, name, target)
+                savePinTarget = null
+            },
+            onDismiss = { savePinTarget = null },
+        )
+    }
+
     if (searchOpen) {
         SearchDialog(
             near = myLocation,
@@ -1429,6 +1504,71 @@ private fun SearchDialog(
     )
 }
 
+/** One-tap saved-place chips over the map, plus a "Save pin" chip when a
+ *  destination pin is on screen. Scrolls horizontally when they overflow. */
+@Composable
+private fun ShortcutChips(
+    places: List<SavedPlace>,
+    canSavePin: Boolean,
+    onPick: (SavedPlace) -> Unit,
+    onSavePin: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (canSavePin) {
+            AssistChip(
+                onClick = onSavePin,
+                label = { Text("Save pin") },
+                leadingIcon = { Icon(Icons.Default.Add, contentDescription = null,
+                    Modifier.size(18.dp)) },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = glassContainerColor()),
+            )
+        }
+        places.forEach { p ->
+            AssistChip(
+                onClick = { onPick(p) },
+                label = { Text(p.name, maxLines = 1) },
+                leadingIcon = { Icon(Icons.Default.Place, contentDescription = null,
+                    Modifier.size(18.dp)) },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = glassContainerColor()),
+            )
+        }
+    }
+}
+
+/** Name the current pin and save it as a shortcut. */
+@Composable
+private fun SavePinDialog(
+    suggestedName: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf(suggestedName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save this place") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name (Home, Work…)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(name) }, enabled = name.isNotBlank()) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 /** Compact dropdown selector for destination kind and direction. */
 @Composable
 private fun SelectorChip(
@@ -1469,11 +1609,10 @@ private fun CandidatesCard(
     modifier: Modifier = Modifier,
 ) {
     Card(
-        modifier = modifier,
+        modifier = modifier.glassBorder(MaterialTheme.shapes.extraLarge),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ),
+        colors = glassCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Pick a destination", style = MaterialTheme.typography.titleMedium,
@@ -1563,31 +1702,50 @@ private fun MapToolbar(
     onOpenBadges: () -> Unit,
     onOpenFriends: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSavedPlaces: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val glassColor = glassContainerColor()
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SmallFloatingActionButton(onClick = onToggleFollow) {
+        SmallFloatingActionButton(
+            onClick = onToggleFollow,
+            containerColor = glassColor,
+        ) {
             Icon(
                 if (followMe) Icons.Default.MyLocation else Icons.Default.LocationSearching,
                 contentDescription = if (followMe) "Stop following my location"
                     else "Follow my location",
             )
         }
-        SmallFloatingActionButton(onClick = onSearch) {
+        SmallFloatingActionButton(
+            onClick = onSearch,
+            containerColor = glassColor,
+        ) {
             Icon(Icons.Default.Search, contentDescription = "Search destination")
         }
-        SmallFloatingActionButton(onClick = onToggleFog) {
+        SmallFloatingActionButton(
+            onClick = onToggleFog,
+            containerColor = glassColor,
+        ) {
             Icon(
                 if (fogEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
                 contentDescription = "Fog of war",
             )
         }
         Box {
-            SmallFloatingActionButton(onClick = { menuOpen = true }) {
+            SmallFloatingActionButton(
+                onClick = { menuOpen = true },
+                containerColor = glassColor,
+            ) {
                 Icon(Icons.Default.MoreVert, contentDescription = "More")
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Saved places") },
+                    leadingIcon = { Icon(Icons.Default.Place, contentDescription = null) },
+                    onClick = { menuOpen = false; onOpenSavedPlaces() },
+                )
                 DropdownMenuItem(
                     text = { Text("Trip history") },
                     leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
@@ -1643,11 +1801,12 @@ private fun CollapsedSpinBar(
     modifier: Modifier = Modifier,
 ) {
     Card(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .glassBorder(MaterialTheme.shapes.extraLarge),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ),
+        colors = glassCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
             Modifier
@@ -1710,11 +1869,11 @@ private fun SpeedHud(
             SpeedLimitSign(it, size = 48.dp)
         }
         Card(
+            modifier = Modifier.glassBorder(CircleShape),
             shape = CircleShape,
-            colors = CardDefaults.cardColors(
-                containerColor = if (speeding) MaterialTheme.colorScheme.errorContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHigh,
-            ),
+            colors = if (speeding) CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+            ) else glassCardColors(),
             elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
         ) {
             Column(
@@ -1862,10 +2021,12 @@ private fun ActiveTripCard(stats: TripStats) {
         }
     }
     Card(
+        modifier = Modifier.glassBorder(MaterialTheme.shapes.extraLarge),
         shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.92f),
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
             Modifier

@@ -73,11 +73,14 @@ fun NavigationBanner(
     modifier: Modifier = Modifier,
 ) {
     Card(
-        modifier = modifier,
+        modifier = modifier.glassBorder(MaterialTheme.shapes.extraLarge),
         shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            // Kept a touch more opaque than the other overlays: the turn
+            // instruction has to read at a glance at speed.
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f),
         ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
             Modifier.padding(16.dp),
@@ -120,11 +123,10 @@ fun NavigationBottomBar(
     modifier: Modifier = Modifier,
 ) {
     Card(
-        modifier = modifier,
+        modifier = modifier.glassBorder(MaterialTheme.shapes.extraLarge),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ),
+        colors = glassCardColors(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
             Modifier

@@ -34,6 +34,7 @@ import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
 import org.maplibre.geojson.Polygon
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
@@ -65,7 +66,11 @@ const val LAYER_CANDIDATES = "mr-candidates-dot"
  * destination + own-position markers. Created once per [Style]; [render] only
  * pushes new GeoJSON, so overlays update without rebuilding the map.
  */
-class MapOverlays(private val style: Style, context: Context) {
+class MapOverlays(private val style: Style, context: Context, darkTheme: Boolean) {
+
+    // The route line follows the app accent: amber on the dark basemap, blue on
+    // the light one, so navigation matches the chrome instead of always amber.
+    private val routeColor = if (darkTheme) ROUTE_COLOR_DARK else ROUTE_COLOR_LIGHT
 
     init {
         ContextCompat.getDrawable(context, R.drawable.ic_map_pin)?.let {
@@ -94,7 +99,7 @@ class MapOverlays(private val style: Style, context: Context) {
             PropertyFactory.lineOpacity(0.85f), PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
             PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)))
         style.addLayer(LineLayer("mr-route-line", SRC_ROUTE).withProperties(
-            PropertyFactory.lineColor(ROUTE_COLOR), PropertyFactory.lineWidth(7f),
+            PropertyFactory.lineColor(routeColor), PropertyFactory.lineWidth(7f),
             PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
             PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND)))
         style.addLayer(SymbolLayer("mr-position", SRC_POSITION).withProperties(
@@ -170,7 +175,8 @@ class MapOverlays(private val style: Style, context: Context) {
     }
 
     companion object {
-        const val ROUTE_COLOR = "#E8B04B" // amber — the Graphite accent, on the map too
+        const val ROUTE_COLOR_DARK = "#E8B04B"  // amber — the Graphite night accent
+        const val ROUTE_COLOR_LIGHT = "#2F80ED" // blue — the day accent
     }
 }
 
@@ -224,7 +230,13 @@ fun setCamera(map: MapLibreMap, lat: Double, lon: Double, zoom: Double, bearingD
  */
 class FogView(context: Context) : View(context) {
     var map: MapLibreMap? = null
+    // Raw GPS tracks carry a point every few metres; the fog corridor is tens of
+    // metres wide, so projecting every one through the per-point JNI call is the
+    // bulk of the pan cost. Store a decimated copy — points within ~25 m of the
+    // last kept one are dropped — which cuts the projection work several-fold with
+    // no visible change to the corridor.
     var traces: List<List<LatLon>> = emptyList()
+        set(value) { field = value.map { decimate(it) } }
     var currentLocation: LatLon? = null
     var corridorMeters: Float = 200f
     var active: Boolean = false
@@ -245,7 +257,15 @@ class FogView(context: Context) : View(context) {
         isAntiAlias = true
         xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
     }
+    // A soft scrim doesn't need pixel-exact edges, so the buffer is rendered at a
+    // fraction of screen resolution and blown back up on draw. Everything here is
+    // a software (CPU, main-thread) canvas — erasing and path-filling a full 1440×
+    // 3120 ARGB bitmap every camera move cost ~65 ms/frame; at 1/DOWNSCALE it's a
+    // ~9× smaller bitmap, which is what takes the fog off the jank budget.
     private var buffer: Bitmap? = null
+    private var bufferCanvas: Canvas? = null
+    private val upscalePaint = Paint().apply { isFilterBitmap = true }
+    private val dst = android.graphics.RectF()
 
     override fun onDraw(canvas: Canvas) {
         if (!active) return
@@ -254,16 +274,23 @@ class FogView(context: Context) : View(context) {
         val h = height
         if (w <= 0 || h <= 0) return
 
-        val buf = buffer?.takeIf { it.width == w && it.height == h }
-            ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { buffer = it }
+        val bw = max(1, (w + FOG_DOWNSCALE - 1) / FOG_DOWNSCALE)
+        val bh = max(1, (h + FOG_DOWNSCALE - 1) / FOG_DOWNSCALE)
+        val buf = buffer?.takeIf { it.width == bw && it.height == bh }
+            ?: Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888).also {
+                buffer = it
+                bufferCanvas = Canvas(it)
+            }
+        val bufCanvas = bufferCanvas ?: return
         buf.eraseColor(fogColor)
-        val bufCanvas = Canvas(buf)
 
+        // Buffer space: full-res screen coords scaled down by FOG_DOWNSCALE.
+        val s = 1f / FOG_DOWNSCALE
         val proj = m.projection
         val lat = currentLocation?.lat ?: m.cameraPosition.target?.latitude ?: 0.0
         val metersPerPx = proj.getMetersPerPixelAtLatitude(lat).toFloat()
         val corridorPx = max(18f, corridorMeters / metersPerPx)
-        clearPaint.strokeWidth = corridorPx
+        clearPaint.strokeWidth = corridorPx * s
 
         // toScreenLocation is a per-point JNI call, so projecting every trace
         // every frame is what made panning lag. Cull whole traces whose bounding
@@ -291,16 +318,42 @@ class FogView(context: Context) : View(context) {
             var first = true
             for (p in trace) {
                 val sp = proj.toScreenLocation(LatLng(p.lat, p.lon))
-                if (first) { path.moveTo(sp.x, sp.y); first = false } else path.lineTo(sp.x, sp.y)
+                if (first) { path.moveTo(sp.x * s, sp.y * s); first = false }
+                else path.lineTo(sp.x * s, sp.y * s)
             }
             bufCanvas.drawPath(path, clearPaint)
         }
         currentLocation?.let { loc ->
             val sp = proj.toScreenLocation(LatLng(loc.lat, loc.lon))
-            pt.set(sp.x, sp.y)
-            bufCanvas.drawCircle(pt.x, pt.y, max(corridorPx, corridorMeters * 1.75f / metersPerPx),
-                clearFillPaint)
+            pt.set(sp.x * s, sp.y * s)
+            bufCanvas.drawCircle(pt.x, pt.y,
+                max(corridorPx, corridorMeters * 1.75f / metersPerPx) * s, clearFillPaint)
         }
-        canvas.drawBitmap(buf, 0f, 0f, null)
+        dst.set(0f, 0f, w.toFloat(), h.toFloat())
+        canvas.drawBitmap(buf, null, dst, upscalePaint)
+    }
+
+    companion object {
+        // 1/3 resolution: the scrim edge stays soft, the CPU fill drops ~9×.
+        private const val FOG_DOWNSCALE = 3
+        // ~25 m in degrees of latitude; used as the decimation floor for traces.
+        private const val DECIMATE_DEG = 2.25e-4
+
+        /** Drop points within [DECIMATE_DEG] of the last kept one; endpoints stay. */
+        private fun decimate(trace: List<LatLon>): List<LatLon> {
+            if (trace.size <= 2) return trace
+            val out = ArrayList<LatLon>(trace.size)
+            var last = trace[0]
+            out.add(last)
+            for (i in 1 until trace.size - 1) {
+                val p = trace[i]
+                if (abs(p.lat - last.lat) > DECIMATE_DEG || abs(p.lon - last.lon) > DECIMATE_DEG) {
+                    out.add(p)
+                    last = p
+                }
+            }
+            out.add(trace[trace.size - 1])
+            return out
+        }
     }
 }

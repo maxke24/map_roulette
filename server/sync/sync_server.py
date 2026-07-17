@@ -21,7 +21,7 @@ Protocol
   POST /auth/login    {username, password}      -> {token, username}
   POST /auth/logout                             -> {} (revokes the bearer token)
   GET  /me                                      -> {username, stats, badges}
-  POST /sync {trips, traces, badges, stats, shareFog?} -> merged {trips, traces, badges}
+  POST /sync {trips, traces, badges, savedPlaces?, stats, shareFog?} -> merged {trips, traces, badges, savedPlaces}
   GET  /friends                                 -> {friends, incoming, outgoing}
   POST /friends/request {username}              -> {status}
   POST /friends/respond {username, accept}      -> {status}
@@ -162,6 +162,12 @@ def init_db():
             line_hash TEXT NOT NULL,
             line      TEXT NOT NULL,
             PRIMARY KEY (user_id, line_hash)
+        );
+        CREATE TABLE IF NOT EXISTS saved_places (
+            user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            place_id INTEGER NOT NULL,
+            json     TEXT NOT NULL,
+            PRIMARY KEY (user_id, place_id)
         );
         -- One row per pair, with low_id < high_id so a pair can never be
         -- represented twice. requested_by says who has to accept.
@@ -349,8 +355,11 @@ def do_sync(user, body):
     uid = user["id"]
     trips_in = body.get("trips") or []
     traces_in = body.get("traces") or []
+    places_in = body.get("savedPlaces") or []
     if not isinstance(trips_in, list) or not isinstance(traces_in, list):
         raise HttpError(400, "trips and traces must be arrays")
+    if not isinstance(places_in, list):
+        raise HttpError(400, "savedPlaces must be an array")
 
     badges = clean_badges(json.loads(user["badges_json"]))
     for badge_id, earned in clean_badges(body.get("badges")).items():
@@ -394,6 +403,16 @@ def do_sync(user, body):
                 "INSERT OR IGNORE INTO traces (user_id, line_hash, line) VALUES (?, ?, ?)",
                 (uid, hashlib.sha256(line.encode()).hexdigest(), line),
             )
+        for place in places_in:
+            if not isinstance(place, dict) or "id" not in place:
+                raise HttpError(400, "saved place missing id")
+            # Upsert by id so a rename replaces the stored copy; the merge below
+            # returns the union, which is what restores shortcuts after reinstall.
+            conn.execute(
+                "INSERT INTO saved_places (user_id, place_id, json) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id, place_id) DO UPDATE SET json = excluded.json",
+                (uid, int(place["id"]), json.dumps(place)),
+            )
         conn.execute(
             "UPDATE users SET badges_json = ?, stats_json = ?, share_fog = ? WHERE id = ?",
             (json.dumps(badges), json.dumps(stats), share_fog, uid),
@@ -410,7 +429,14 @@ def do_sync(user, body):
         r["line"]
         for r in db().execute("SELECT line FROM traces WHERE user_id = ?", (uid,))
     ]
-    return {"trips": trips, "traces": traces, "badges": badges}
+    saved_places = [
+        json.loads(r["json"])
+        for r in db().execute(
+            "SELECT json FROM saved_places WHERE user_id = ? ORDER BY place_id", (uid,)
+        )
+    ]
+    return {"trips": trips, "traces": traces, "badges": badges,
+            "savedPlaces": saved_places}
 
 
 def do_me(user):

@@ -6,9 +6,9 @@ import androidx.compose.ui.graphics.Color
 
 /**
  * The Graphite identity: warm graphite grounds with a single amber accent by
- * night, a warm porcelain ground with a deeper amber by day. Replaces Material
+ * night, a cool white ground with a clear blue accent by day. Replaces Material
  * You dynamic colour so the app has its own look instead of the wallpaper's.
- * The accent deepens on light so it stays legible on a pale ground.
+ * Blue on white reads cleaner over the map than amber did.
  */
 
 // Night — warm graphite + amber.
@@ -47,38 +47,38 @@ val GraphiteDark = darkColorScheme(
     inversePrimary = Color(0xFFB87A1B),
 )
 
-// Day — warm porcelain + deeper amber.
+// Day — cool white + a light, friendly blue.
 val GraphiteLight = lightColorScheme(
-    primary = Color(0xFFB87A1B),
+    primary = Color(0xFF2F80ED),
     onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFF6E2BC),
-    onPrimaryContainer = Color(0xFF3A2A06),
-    secondary = Color(0xFF8A7A52),
+    primaryContainer = Color(0xFFDCEBFD),
+    onPrimaryContainer = Color(0xFF0B3D82),
+    secondary = Color(0xFF5A7196),
     onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFEDE6D3),
-    onSecondaryContainer = Color(0xFF322C18),
-    tertiary = Color(0xFFB87A1B),
+    secondaryContainer = Color(0xFFE1ECF9),
+    onSecondaryContainer = Color(0xFF1A2D45),
+    tertiary = Color(0xFF2F80ED),
     onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFF6E2BC),
-    onTertiaryContainer = Color(0xFF3A2A06),
-    background = Color(0xFFF0EEE8),
-    onBackground = Color(0xFF241F16),
-    surface = Color(0xFFFBF9F3),
-    onSurface = Color(0xFF241F16),
-    surfaceVariant = Color(0xFFE7E2D5),
-    onSurfaceVariant = Color(0xFF6E665A),
+    tertiaryContainer = Color(0xFFDCEBFD),
+    onTertiaryContainer = Color(0xFF0B3D82),
+    background = Color(0xFFF6F9FD),
+    onBackground = Color(0xFF1A1C20),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF1A1C20),
+    surfaceVariant = Color(0xFFE3EAF3),
+    onSurfaceVariant = Color(0xFF56606E),
     surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF8F5EF),
-    surfaceContainer = Color(0xFFF5F2EA),
-    surfaceContainerHigh = Color(0xFFEFEBE1),
-    surfaceContainerHighest = Color(0xFFE9E4D8),
-    outline = Color(0xFF928A78),
-    outlineVariant = Color(0xFFD8D2C4),
-    error = Color(0xFFE23B2E),
+    surfaceContainerLow = Color(0xFFF3F7FC),
+    surfaceContainer = Color(0xFFEDF3FA),
+    surfaceContainerHigh = Color(0xFFE7EEF7),
+    surfaceContainerHighest = Color(0xFFE0E9F3),
+    outline = Color(0xFF8A96A6),
+    outlineVariant = Color(0xFFCAD5E3),
+    error = Color(0xFFD32F2F),
     onError = Color(0xFFFFFFFF),
     errorContainer = Color(0xFFFADAD5),
     onErrorContainer = Color(0xFF5A1710),
-    inverseSurface = Color(0xFF241F16),
-    inverseOnSurface = Color(0xFFF5F2EA),
-    inversePrimary = Color(0xFFE8B04B),
+    inverseSurface = Color(0xFF2A2F36),
+    inverseOnSurface = Color(0xFFEDF3FA),
+    inversePrimary = Color(0xFFAACDF8),
 )
