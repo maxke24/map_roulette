@@ -35,14 +35,35 @@ object Geocoder {
     }
 
     fun search(context: Context, query: String, near: LatLon?, limit: Int = 8): List<GeocodeResult> {
+        val primary = baseUrl().trimEnd('/')
+        // If a custom/baked instance is down, fail over to the public one so search
+        // keeps working; when the primary already is public there is nothing to add.
+        val endpoints = if (primary == PUBLIC) listOf(PUBLIC) else listOf(primary, PUBLIC)
+        // A self-hosted Photon is protected by the routing server's CF Access token.
+        val access = RoutingServer.load(context)
+
+        var lastError: IOException? = null
+        for (base in endpoints) {
+            try {
+                return fetch(base, query, near, limit, access.takeIf { base != PUBLIC })
+            } catch (e: IOException) {
+                lastError = e
+            }
+        }
+        throw lastError ?: IOException("Search failed")
+    }
+
+    private fun fetch(
+        base: String,
+        query: String,
+        near: LatLon?,
+        limit: Int,
+        access: ServerConfig?,
+    ): List<GeocodeResult> {
         // lat/lon biases ranking toward the user without hard-restricting the area.
         val bias = near?.let { "&lat=${it.lat}&lon=${it.lon}" } ?: ""
-        val base = baseUrl().trimEnd('/')
         val url = "$base/api/?q=" +
             URLEncoder.encode(query, "UTF-8") + "&limit=$limit" + bias
-
-        // A self-hosted Photon is protected by the routing server's CF Access token.
-        val access = RoutingServer.load(context).takeIf { base != PUBLIC }
 
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
