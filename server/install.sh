@@ -2,8 +2,8 @@
 #
 # Map Roulette server installer.
 #
-# Installs the sync server (accounts, trips, fog of war) and/or the GraphHopper
-# routing engine that the Android app talks to.
+# Installs the sync server (accounts, trips, fog of war), the GraphHopper
+# routing engine, and/or the Photon geocoder that the Android app talks to.
 #
 #   On a Proxmox host : creates an unprivileged LXC and installs inside it.
 #   Anywhere else     : installs into the current Debian/Ubuntu machine.
@@ -12,9 +12,10 @@
 # installer prints your options at the end and configures none of them.
 #
 #   bash install.sh                     # interactive
-#   bash install.sh --all --yes         # sync + routing, no prompts
+#   bash install.sh --all --yes         # sync + routing + geocoder, no prompts
 #   bash install.sh --sync              # sync server only
 #   bash install.sh --routing --region europe/netherlands
+#   bash install.sh --geocoder --geo-country nl   # Photon geocoder only
 #   bash install.sh --uninstall         # remove services, keep data
 #
 set -euo pipefail
@@ -24,17 +25,20 @@ REF="${MAPROULETTE_REF:-main}"
 RAW="https://raw.githubusercontent.com/${REPO}/${REF}"
 
 # Defaults
-DO_SYNC=0 DO_ROUTING=0 CHOSE=0
+DO_SYNC=0 DO_ROUTING=0 DO_GEOCODER=0 CHOSE=0
 ASSUME_YES=0 UNINSTALL=0 PURGE=0 FORCE_IN_PLACE=0
 REGION="${REGION:-europe/belgium}"
+GEO_CC="${GEO_CC:-be}"            # Photon country-code index (single country)
+PHOTON_VERSION="${PHOTON_VERSION:-1.2.1}"
 CTID="" CT_HOSTNAME="maproulette" CT_BRIDGE="vmbr0" CT_STORAGE=""
 OPEN_REGISTRATION=0
-SYNC_PORT=8790 GH_PORT=8989
+SYNC_PORT=8790 GH_PORT=8989 PHOTON_PORT=2322
 
 SYNC_USER=maproulette-sync
 SYNC_DIR=/opt/maproulette-sync
 SYNC_DATA=/var/lib/maproulette-sync
 GH_DIR=/opt/graphhopper
+PHOTON_DIR=/opt/photon
 
 # ---------------------------------------------------------------- logging
 if [ -t 1 ]; then B=$'\033[1m'; R=$'\033[0;31m'; Y=$'\033[0;33m'; G=$'\033[0;32m'; N=$'\033[0m'
@@ -58,8 +62,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --sync)      DO_SYNC=1; CHOSE=1 ;;
     --routing)   DO_ROUTING=1; CHOSE=1 ;;
-    --all)       DO_SYNC=1; DO_ROUTING=1; CHOSE=1 ;;
+    --geocoder)  DO_GEOCODER=1; CHOSE=1 ;;
+    --all)       DO_SYNC=1; DO_ROUTING=1; DO_GEOCODER=1; CHOSE=1 ;;
     --region)    REGION="${2:?--region needs a value}"; shift ;;
+    --geo-country) GEO_CC="${2:?--geo-country needs a value}"; shift ;;
     --ctid)      CTID="${2:?--ctid needs a value}"; shift ;;
     --hostname)  CT_HOSTNAME="${2:?}"; shift ;;
     --bridge)    CT_BRIDGE="${2:?}"; shift ;;
@@ -112,18 +118,20 @@ is_proxmox_host() { [ -d /etc/pve ] && command -v pct >/dev/null 2>&1; }
 
 pick_components() {
   [ "$CHOSE" = 1 ] && return 0
-  if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ]; then DO_SYNC=1; DO_ROUTING=1; return 0; fi
+  if [ "$ASSUME_YES" = 1 ] || [ ! -t 0 ]; then DO_SYNC=1; DO_ROUTING=1; DO_GEOCODER=1; return 0; fi
   echo
   echo "  What should I install?"
   echo "    1) Sync server only          — accounts, trips, fog of war. Small and fast."
   echo "    2) Routing server only       — GraphHopper. Multi-GB download, long import."
-  echo "    3) Both (default)"
+  echo "    3) Geocoder only             — Photon place/address search. ~1.6 GB download."
+  echo "    4) All (default)"
   local reply
-  read -r -p "  Choice [3]: " reply
-  case "${reply:-3}" in
+  read -r -p "  Choice [4]: " reply
+  case "${reply:-4}" in
     1) DO_SYNC=1 ;;
     2) DO_ROUTING=1 ;;
-    3) DO_SYNC=1; DO_ROUTING=1 ;;
+    3) DO_GEOCODER=1 ;;
+    4) DO_SYNC=1; DO_ROUTING=1; DO_GEOCODER=1 ;;
     *) die "invalid choice: $reply" ;;
   esac
 }
@@ -132,7 +140,8 @@ pick_components() {
 do_uninstall() {
   step "Removing services"
   for unit in maproulette-sync maproulette-backup.timer maproulette-backup \
-              graphhopper-refresh.timer graphhopper-refresh; do
+              graphhopper-refresh.timer graphhopper-refresh \
+              photon-refresh.timer photon-refresh; do
     # `systemctl cat` rather than `list-unit-files | grep -q`: grep exits at the
     # first match and systemd complains about the broken pipe.
     if systemctl cat "$unit" >/dev/null 2>&1; then
@@ -147,13 +156,18 @@ do_uninstall() {
     (cd "$GH_DIR" && docker compose down 2>/dev/null) || true
     ok "stopped graphhopper"
   fi
-  rm -rf "$SYNC_DIR" /usr/local/bin/maproulette-backup.sh /usr/local/bin/graphhopper-refresh.sh
+  if [ -d "$PHOTON_DIR" ] && command -v docker >/dev/null 2>&1; then
+    (cd "$PHOTON_DIR" && docker compose down 2>/dev/null) || true
+    ok "stopped photon"
+  fi
+  rm -rf "$SYNC_DIR" /usr/local/bin/maproulette-backup.sh \
+         /usr/local/bin/graphhopper-refresh.sh /usr/local/bin/photon-refresh.sh
 
   if [ "$PURGE" = 1 ]; then
-    warn "--purge: deleting all trip data, accounts and the routing graph"
-    confirm "This destroys $SYNC_DATA and $GH_DIR permanently. Continue?" \
+    warn "--purge: deleting all trip data, accounts, the routing graph and the geocoder index"
+    confirm "This destroys $SYNC_DATA, $GH_DIR and $PHOTON_DIR permanently. Continue?" \
       || die "aborted"
-    rm -rf "$SYNC_DATA" "$GH_DIR"
+    rm -rf "$SYNC_DATA" "$GH_DIR" "$PHOTON_DIR"
     userdel "$SYNC_USER" 2>/dev/null || true
     ok "purged"
   else
@@ -168,8 +182,13 @@ create_lxc() {
   step "Proxmox host detected — creating a container"
 
   local cores ram disk
-  if [ "$DO_ROUTING" = 1 ]; then cores=4; ram=8192; disk=24
-  else cores=1; ram=512; disk=4; fi
+  cores=1; ram=512; disk=4
+  if [ "$DO_ROUTING" = 1 ]; then cores=4; ram=8192; disk=24; fi
+  if [ "$DO_GEOCODER" = 1 ]; then
+    [ "$cores" -lt 2 ] && cores=2
+    if [ "$ram" -lt 3072 ]; then ram=3072; else ram=$((ram + 2048)); fi
+    disk=$((disk + 12))   # ~1.6 GB tar + ~6 GB extracted index + headroom
+  fi
   info "sizing: ${cores} cores, ${ram} MB RAM, ${disk} GB disk"
   if [ "$DO_ROUTING" = 1 ]; then
     local host_ram_mb; host_ram_mb=$(free -m | awk '/^Mem:/{print $2}')
@@ -242,9 +261,10 @@ create_lxc() {
     ok "copied $(( ${#PAYLOAD[@]} )) files from the local checkout"
   fi
 
-  local flags="--in-place --yes --region $REGION"
+  local flags="--in-place --yes --region $REGION --geo-country $GEO_CC"
   [ "$DO_SYNC" = 1 ] && flags="$flags --sync"
   [ "$DO_ROUTING" = 1 ] && flags="$flags --routing"
+  [ "$DO_GEOCODER" = 1 ] && flags="$flags --geocoder"
   [ "$OPEN_REGISTRATION" = 1 ] && flags="$flags --open-registration"
 
   # LC_ALL=C silences the template's missing-locale warnings from apt/perl.
@@ -525,6 +545,129 @@ EOF
   ok "monthly OSM refresh timer enabled"
 }
 
+# Resolve the newest dated country index on the mirror. The `-latest` symlink is
+# unreliable there (HTTP 404 on some countries), so we read the directory listing.
+photon_index_url() {
+  local base="https://download1.graphhopper.com/public/extracts/by-country-code/${GEO_CC}/"
+  local file
+  file="$(curl -fsS "$base" \
+    | grep -oE "photon-db-${GEO_CC}-[0-9]+\.tar\.bz2" | sort -u | tail -1)" \
+    || die "could not list the Photon index mirror for country '$GEO_CC'"
+  [ -n "$file" ] || die "no Photon index found for country code '$GEO_CC' at $base"
+  printf '%s%s\n' "$base" "$file"
+}
+
+install_geocoder() {
+  step "Installing the geocoder (Photon, country=$GEO_CC)"
+  apt-get install -y -qq curl ca-certificates bzip2 >/dev/null
+  install_docker
+
+  install -d -m 0755 "$PHOTON_DIR/data"
+
+  # Photon's search index for one country (prebuilt by GraphHopper). Extracts to
+  # a photon_data/ directory next to the jar; that's the -data-dir Photon reads.
+  if [ ! -d "$PHOTON_DIR/data/photon_data" ]; then
+    local url name
+    url="$(photon_index_url)"; name="$(basename "$url")"
+    info "downloading $url"
+    curl -fL# "$url" -o "$PHOTON_DIR/data/$name.part" || die "index download failed"
+    mv "$PHOTON_DIR/data/$name.part" "$PHOTON_DIR/data/$name"
+    ok "index: $name ($(du -h "$PHOTON_DIR/data/$name" | cut -f1))"
+    info "extracting (a few minutes) …"
+    tar -xjf "$PHOTON_DIR/data/$name" -C "$PHOTON_DIR/data"
+    rm -f "$PHOTON_DIR/data/$name"
+    [ -d "$PHOTON_DIR/data/photon_data" ] || die "extract did not yield photon_data/"
+    ok "index extracted"
+  else
+    ok "index already present ($(du -sh "$PHOTON_DIR/data/photon_data" | cut -f1))"
+  fi
+
+  # The jar version must match the index's OpenSearch format. The mirror tracks
+  # Photon releases, so the latest release normally fits. If Photon refuses to
+  # start with an index/OpenSearch version error, set PHOTON_VERSION to the
+  # release the index was built with and re-run.
+  if [ ! -f "$PHOTON_DIR/data/photon.jar" ]; then
+    local jar="https://github.com/komoot/photon/releases/download/${PHOTON_VERSION}/photon-${PHOTON_VERSION}.jar"
+    info "downloading $jar"
+    curl -fL# "$jar" -o "$PHOTON_DIR/data/photon.jar.part" || die "photon.jar download failed"
+    mv "$PHOTON_DIR/data/photon.jar.part" "$PHOTON_DIR/data/photon.jar"
+    ok "photon-${PHOTON_VERSION}.jar"
+  fi
+
+  # Heap: one country is small; 2g is plenty, and OpenSearch mmaps the rest.
+  cat > "$PHOTON_DIR/docker-compose.yml" <<EOF
+services:
+  photon:
+    image: eclipse-temurin:21-jre
+    container_name: photon
+    working_dir: /photon
+    command: java -Xmx2g -jar /photon/photon.jar -data-dir /photon -listen-ip 0.0.0.0 -listen-port ${PHOTON_PORT}
+    volumes:
+      - ./data:/photon
+    # localhost only: exposure is your decision, see the notes at the end.
+    ports:
+      - "127.0.0.1:${PHOTON_PORT}:${PHOTON_PORT}"
+    restart: unless-stopped
+EOF
+
+  cat > /usr/local/bin/photon-refresh.sh <<EOF
+#!/usr/bin/env bash
+# Refresh the Photon country index and restart. Reads the newest dated file from
+# the mirror (the -latest symlink there is unreliable).
+set -euo pipefail
+base="https://download1.graphhopper.com/public/extracts/by-country-code/${GEO_CC}/"
+file="\$(curl -fsS "\$base" | grep -oE "photon-db-${GEO_CC}-[0-9]+\\.tar\\.bz2" | sort -u | tail -1)"
+[ -n "\$file" ] || { echo "no index found for ${GEO_CC}"; exit 1; }
+cd "$PHOTON_DIR/data"
+curl -fL "\$base\$file" -o "\$file.part"
+mv "\$file.part" "\$file"
+cd "$PHOTON_DIR" && docker compose down
+rm -rf "$PHOTON_DIR/data/photon_data"
+tar -xjf "$PHOTON_DIR/data/\$file" -C "$PHOTON_DIR/data"
+rm -f "$PHOTON_DIR/data/\$file"
+docker compose up -d
+EOF
+  chmod 0755 /usr/local/bin/photon-refresh.sh
+
+  cat > /etc/systemd/system/photon-refresh.service <<'EOF'
+[Unit]
+Description=Refresh Photon geocoder index
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/photon-refresh.sh
+EOF
+  cat > /etc/systemd/system/photon-refresh.timer <<'EOF'
+[Unit]
+Description=Monthly Photon index refresh
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+RandomizedDelaySec=2h
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable photon-refresh.timer >/dev/null 2>&1
+
+  step "Starting Photon — it loads the index into OpenSearch (1-3 minutes)"
+  (cd "$PHOTON_DIR" && docker compose up -d >/dev/null 2>&1) || die "docker compose up failed"
+
+  local i
+  for i in $(seq 1 40); do   # 40 * 6s = 4 min
+    if curl -fsS "http://localhost:$PHOTON_PORT/api?q=test&limit=1" >/dev/null 2>&1; then break; fi
+    if [ "$i" = 40 ]; then
+      (cd "$PHOTON_DIR" && docker compose logs --tail 30)
+      die "Photon never became ready. If the logs show an OpenSearch/index version mismatch, set PHOTON_VERSION to match the index and re-run."
+    fi
+    sleep 6
+  done
+  ok "photon up on 127.0.0.1:$PHOTON_PORT"
+  ok "monthly index refresh timer enabled"
+}
+
 print_next_steps() {
   cat <<EOF
 
@@ -538,14 +681,15 @@ $B  Exposing them — pick one:$N
   1. Cloudflare Tunnel + Access  (what the author runs; no open ports)
        - install cloudflared, create a tunnel, point a hostname at
 EOF
-  [ "$DO_SYNC" = 1 ]    && echo "           http://localhost:$SYNC_PORT   (sync)"
-  [ "$DO_ROUTING" = 1 ] && echo "           http://localhost:$GH_PORT   (routing)"
+  [ "$DO_SYNC" = 1 ]     && echo "           http://localhost:$SYNC_PORT   (sync)"
+  [ "$DO_ROUTING" = 1 ]  && echo "           http://localhost:$GH_PORT   (routing)"
+  [ "$DO_GEOCODER" = 1 ] && echo "           http://localhost:$PHOTON_PORT   (geocoder / search)"
   cat <<EOF
-       - protect BOTH hostnames with an Access application whose policy is
-         Action=Service Auth, including a service token. The app sends that
-         token's headers on every request.
-       - GraphHopper has NO authentication of its own. If you expose it
-         without Access in front, you are running an open routing engine.
+       - protect EVERY hostname with an Access application whose policy is
+         Action=Service Auth, including the SAME service token. The app sends
+         that one token's headers to routing, sync and the geocoder alike.
+       - Neither GraphHopper nor Photon has authentication of its own. If you
+         expose either without Access in front, it is open to the internet.
 
   2. Tailscale / WireGuard — join the phone to the private network and point
      the app at the machine's VPN address. No public exposure at all.
@@ -554,8 +698,9 @@ EOF
      front of the routing port; the sync server authenticates users itself,
      but its /auth/register endpoint should still be invite-gated.
 
-$B  Then, in the app$N (Settings → Server), enter the sync URL, the routing
-  URL, and the CF Access service-token ID/secret if you used option 1.
+$B  Then, in the app$N (Settings → Server), enter the routing URL, the sync URL,
+  the geocoder (search) URL, and the CF Access service-token ID/secret if you
+  used option 1. The one token's ID/secret is shared across all three.
 
 $B  Verify anytime:$N
        bash verify.sh $([ "$DO_ROUTING" = 1 ] && echo --routing)
@@ -581,7 +726,7 @@ main() {
   if [ "$UNINSTALL" = 1 ]; then do_uninstall; exit 0; fi
 
   pick_components
-  [ "$DO_SYNC" = 1 ] || [ "$DO_ROUTING" = 1 ] || die "nothing to do"
+  [ "$DO_SYNC" = 1 ] || [ "$DO_ROUTING" = 1 ] || [ "$DO_GEOCODER" = 1 ] || die "nothing to do"
 
   if is_proxmox_host && [ "$FORCE_IN_PLACE" = 0 ]; then
     create_lxc
@@ -593,8 +738,9 @@ main() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq >/dev/null
 
-  [ "$DO_SYNC" = 1 ]    && install_sync
-  [ "$DO_ROUTING" = 1 ] && install_routing
+  [ "$DO_SYNC" = 1 ]     && install_sync
+  [ "$DO_ROUTING" = 1 ]  && install_routing
+  [ "$DO_GEOCODER" = 1 ] && install_geocoder
 
   if [ -n "$SRCDIR" ] && [ -f "$SRCDIR/verify.sh" ]; then
     install -m 0755 "$SRCDIR/verify.sh" /usr/local/bin/maproulette-verify.sh

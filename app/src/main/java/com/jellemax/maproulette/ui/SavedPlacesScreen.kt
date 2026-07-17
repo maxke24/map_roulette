@@ -170,7 +170,7 @@ private fun AddPlaceDialog(
         delay(400)
         searching = true
         results = try {
-            withContext(Dispatchers.IO) { Geocoder.search(query, null) }
+            withContext(Dispatchers.IO) { Geocoder.search(context, query, null) }
         } catch (e: Exception) {
             emptyList()
         }

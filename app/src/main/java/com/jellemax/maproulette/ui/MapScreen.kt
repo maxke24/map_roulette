@@ -20,6 +20,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,13 +38,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Casino
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.ExpandLess
@@ -83,6 +86,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -102,6 +106,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -110,6 +116,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jellemax.maproulette.R
@@ -1396,7 +1404,9 @@ fun MapScreen(
     }
 }
 
-/** Address/place search; a picked result becomes the destination. */
+/** Full-screen place search: type to get live suggestions, tap one to make it the
+ *  destination. Opens with the keyboard up, recents show first, and there is no
+ *  Search button — results stream in as you type. */
 @Composable
 private fun SearchDialog(
     near: LatLon?,
@@ -1404,104 +1414,115 @@ private fun SearchDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<GeocodeResult>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val recents = remember { RecentSearchStore.load(context) }
+    val recentNames = remember(recents) { recents.map { it.name }.toSet() }
+    val focusRequester = remember { FocusRequester() }
 
     fun pick(r: GeocodeResult) {
         RecentSearchStore.save(context, r)
         onPick(r)
     }
 
-    fun run() {
-        if (query.isBlank() || searching) return
-        searching = true
-        error = null
-        scope.launch {
-            try {
-                // Explicit search: unbounded, so the user can still reach places far from home.
-                results = withContext(Dispatchers.IO) { Geocoder.search(query, near) }
-                if (results.isEmpty()) error = "No results"
-            } catch (e: Exception) {
-                error = e.message ?: "Search failed"
-            }
-            searching = false
-        }
-    }
+    // Start with the keyboard up so the user types straight away.
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
-    // Live suggestions as the user types, debounced so we don't hammer Nominatim per keystroke.
-    // Recent picks that match are surfaced first; the network lookup is bounded to nearby places
-    // so a short query like "kru" doesn't suggest a same-named place on the other side of the world.
+    // Live, debounced suggestions. Matching recents show instantly, then a single
+    // Photon lookup runs — it already blends the query match with proximity to the
+    // user, so nearby streets and POIs rank first while a famous far place still
+    // surfaces where it belongs. Recents are kept on top, then deduped against hits.
     LaunchedEffect(query) {
-        if (query.isBlank()) {
-            results = recents
-            error = null
-            return@LaunchedEffect
-        }
-        val recentMatches = recents.filter { it.name.contains(query, ignoreCase = true) }
-        if (query.length < 3) {
-            results = recentMatches
-            error = null
-            return@LaunchedEffect
-        }
-        results = recentMatches
-        delay(400)
-        searching = true
+        val q = query.trim()
         error = null
+        if (q.length < 2) {
+            results = if (q.isEmpty()) recents
+                else recents.filter { it.name.contains(q, ignoreCase = true) }
+            searching = false
+            return@LaunchedEffect
+        }
+        val recentMatches = recents.filter { it.name.contains(q, ignoreCase = true) }
+        results = recentMatches
+        delay(300)
+        searching = true
         try {
-            val nearby = withContext(Dispatchers.IO) { Geocoder.search(query, near, bounded = near != null) }
-            val fresh = nearby.filter { hit -> recentMatches.none { it.name == hit.name } }
-            results = recentMatches + fresh
-            if (results.isEmpty()) error = "No results"
+            val hits = withContext(Dispatchers.IO) { Geocoder.search(context, q, near) }
+            val seen = HashSet(recentMatches.map { it.name })
+            val merged = ArrayList(recentMatches)
+            for (hit in hits) if (seen.add(hit.name)) merged.add(hit)
+            results = merged
+            error = if (merged.isEmpty()) "No results" else null
         } catch (e: Exception) {
             error = e.message ?: "Search failed"
         }
         searching = false
     }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("Where to?") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = { Text("Address or place") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { run() }),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (searching) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                }
-                error?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall)
-                }
-                results.forEach { r ->
-                    Text(
-                        r.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { pick(r) }
-                            .padding(vertical = 10.dp),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder = { Text("Search address or place") },
+                        singleLine = true,
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        trailingIcon = {
+                            if (searching) {
+                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else if (query.isNotEmpty()) {
+                                IconButton(onClick = { query = "" }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                }
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        modifier = Modifier.weight(1f).focusRequester(focusRequester),
                     )
                 }
+                error?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                }
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(results) { r ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { pick(r) }
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                if (r.name in recentNames) Icons.Default.History else Icons.Default.Place,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(16.dp))
+                            Text(r.name, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { run() }, enabled = !searching) { Text("Search") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
+        }
+    }
 }
 
 /** One-tap saved-place chips over the map, plus a "Save pin" chip when a

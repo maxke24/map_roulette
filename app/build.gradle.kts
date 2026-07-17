@@ -24,8 +24,8 @@ android {
         applicationId = "com.jellemax.maproulette"
         minSdk = 26
         targetSdk = 35
-        versionCode = 34
-        versionName = "1.27"
+        versionCode = 35
+        versionName = "1.28"
 
         buildConfigField("String", "ROUTING_URL",
             "\"${routingCfg("routing.url", "ROUTING_SERVER_URL")}\"")
@@ -35,6 +35,8 @@ android {
             "\"${routingCfg("routing.cfSecret", "ROUTING_CF_SECRET")}\"")
         buildConfigField("String", "SYNC_URL",
             "\"${routingCfg("sync.url", "SYNC_SERVER_URL")}\"")
+        buildConfigField("String", "GEOCODER_URL",
+            "\"${routingCfg("geocoder.url", "GEOCODER_URL")}\"")
     }
 
     buildTypes {

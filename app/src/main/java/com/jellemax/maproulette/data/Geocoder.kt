@@ -1,6 +1,8 @@
 package com.jellemax.maproulette.data
 
-import org.json.JSONArray
+import android.content.Context
+import com.jellemax.maproulette.BuildConfig
+import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -9,31 +11,49 @@ import java.util.zip.GZIPInputStream
 
 data class GeocodeResult(val name: String, val location: LatLon)
 
-/** Address/place search via OSM Nominatim, biased toward the user's area. */
+/**
+ * Address/place search via Photon, an OSM-backed geocoder built for type-ahead.
+ * Unlike Nominatim's importance-only ranking, Photon blends the query match with
+ * proximity to [near], so nearby streets and POIs surface first while a famous far
+ * city still ranks where it belongs — one call, no bounded vs. unbounded juggling.
+ * It also indexes POIs (shops, stations), so "colruyt" finds the nearest store.
+ *
+ * The endpoint is resolved per request: the user's self-hosted Photon (Settings) if
+ * set, else the one baked into the APK, else the public komoot instance as a
+ * fallback. A self-hosted instance sits behind the same Cloudflare Access service
+ * token as the routing server, so those credentials are reused here.
+ */
 object Geocoder {
 
-    /**
-     * @param bounded Hard-restrict results to the viewbox around [near] instead of just
-     * preferring it. Without this, a plain viewbox is only a soft ranking hint, so short
-     * live-typed queries (e.g. "kru") can surface same-named places on the other side of the
-     * world (Kraków) ahead of the nearby match.
-     */
-    fun search(query: String, near: LatLon?, limit: Int = 6, bounded: Boolean = false): List<GeocodeResult> {
-        val viewbox = near?.let {
-            "&viewbox=${it.lon - 0.7},${it.lat + 0.7},${it.lon + 0.7},${it.lat - 0.7}" +
-                if (bounded) "&bounded=1" else ""
-        } ?: ""
-        val url = "https://nominatim.openstreetmap.org/search?format=jsonv2" +
-            "&q=" + URLEncoder.encode(query, "UTF-8") +
-            "&limit=$limit&dedupe=1" + viewbox
+    private const val PUBLIC = "https://photon.komoot.io"
+
+    /** Effective Photon base URL: custom → baked → public. */
+    private fun baseUrl(): String {
+        Settings.geocoderUrl.value.trim().takeIf { it.isNotBlank() }?.let { return it }
+        BuildConfig.GEOCODER_URL.takeIf { it.isNotBlank() }?.let { return it }
+        return PUBLIC
+    }
+
+    fun search(context: Context, query: String, near: LatLon?, limit: Int = 8): List<GeocodeResult> {
+        // lat/lon biases ranking toward the user without hard-restricting the area.
+        val bias = near?.let { "&lat=${it.lat}&lon=${it.lon}" } ?: ""
+        val base = baseUrl().trimEnd('/')
+        val url = "$base/api/?q=" +
+            URLEncoder.encode(query, "UTF-8") + "&limit=$limit" + bias
+
+        // A self-hosted Photon is protected by the routing server's CF Access token.
+        val access = RoutingServer.load(context).takeIf { base != PUBLIC }
 
         val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 5_000
             conn.readTimeout = 10_000
             conn.setRequestProperty("Accept-Encoding", "gzip")
-            // Nominatim usage policy requires an identifying user agent.
             conn.setRequestProperty("User-Agent", "MapRoulette/1.11 (personal Android app)")
+            if (access != null && access.clientId.isNotBlank()) {
+                conn.setRequestProperty("CF-Access-Client-Id", access.clientId)
+                conn.setRequestProperty("CF-Access-Client-Secret", access.clientSecret)
+            }
             if (conn.responseCode != 200) {
                 throw IOException("Search failed: HTTP ${conn.responseCode}")
             }
@@ -49,18 +69,40 @@ object Geocoder {
     }
 
     private fun parse(json: String): List<GeocodeResult> {
-        val arr = JSONArray(json)
-        val results = ArrayList<GeocodeResult>(arr.length())
-        for (i in 0 until arr.length()) {
-            val el = arr.getJSONObject(i)
-            val display = el.optString("display_name")
-            if (display.isBlank()) continue
-            results.add(GeocodeResult(
-                // Full display names run long; the first parts identify the place.
-                name = display.split(",").take(3).joinToString(",").trim(),
-                location = LatLon(el.getDouble("lat"), el.getDouble("lon")),
-            ))
+        val features = JSONObject(json).optJSONArray("features") ?: return emptyList()
+        val results = ArrayList<GeocodeResult>(features.length())
+        for (i in 0 until features.length()) {
+            val feature = features.getJSONObject(i)
+            val coords = feature.optJSONObject("geometry")?.optJSONArray("coordinates") ?: continue
+            val props = feature.optJSONObject("properties") ?: continue
+            // GeoJSON coordinates are [lon, lat].
+            val location = LatLon(coords.getDouble(1), coords.getDouble(0))
+            val label = label(props)
+            if (label.isBlank()) continue
+            results.add(GeocodeResult(label, location))
         }
         return results
+    }
+
+    /** A concise "primary, locality, country" label from Photon's address fields. */
+    private fun label(props: JSONObject): String {
+        fun field(key: String) = props.optString(key).takeIf { it.isNotBlank() }
+
+        val name = field("name")
+        val street = field("street")
+        val house = field("housenumber")
+        val primary = name
+            ?: street?.let { if (house != null) "$it $house" else it }
+            ?: field("city") ?: field("county") ?: field("state") ?: return ""
+
+        val locality = field("city") ?: field("county") ?: field("state")
+        // Photon returns country multilingually ("België / Belgique / Belgien"); keep the first.
+        val country = field("country")?.substringBefore(" /")?.trim()
+
+        return listOfNotNull(primary, locality, country)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(3)
+            .joinToString(", ")
     }
 }

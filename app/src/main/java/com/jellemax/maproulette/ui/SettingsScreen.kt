@@ -562,6 +562,7 @@ private fun ServerSection() {
     var url by remember { mutableStateOf(custom?.url ?: "") }
     var clientId by remember { mutableStateOf(custom?.clientId ?: "") }
     var clientSecret by remember { mutableStateOf(custom?.clientSecret ?: "") }
+    var geocoderUrl by remember { mutableStateOf(Settings.geocoderUrl.value) }
     var saved by remember { mutableStateOf(false) }
 
     SettingsSection("Routing server") {
@@ -599,6 +600,19 @@ private fun ServerSection() {
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        Text(
+            "Optional: your own Photon geocoder for address/place search. " +
+                "Leave empty to use the public one. Reuses the Cloudflare " +
+                "Access credentials above.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        OutlinedTextField(
+            value = geocoderUrl, onValueChange = { geocoderUrl = it; saved = false },
+            label = { Text("Search server URL (optional)") },
+            placeholder = { Text("https://…") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = {
                 if (url.isBlank()) {
@@ -607,12 +621,14 @@ private fun ServerSection() {
                     RoutingServer.save(
                         context, ServerConfig(url, clientId, clientSecret, enabled = true))
                 }
+                Settings.setGeocoderUrl(geocoderUrl)
                 saved = true
             }) { Text(if (saved) "Saved ✓" else "Save server") }
             if (custom != null) {
                 TextButton(onClick = {
                     RoutingServer.clearCustom(context)
-                    url = ""; clientId = ""; clientSecret = ""
+                    Settings.setGeocoderUrl("")
+                    url = ""; clientId = ""; clientSecret = ""; geocoderUrl = ""
                     saved = true
                 }) { Text("Remove custom server") }
             }

@@ -72,6 +72,10 @@ object Settings {
     private val _syncUrl = MutableStateFlow("")
     val syncUrl: StateFlow<String> = _syncUrl
 
+    /** User-entered geocoder (Photon) URL; blank = baked default, else public Photon. */
+    private val _geocoderUrl = MutableStateFlow("")
+    val geocoderUrl: StateFlow<String> = _geocoderUrl
+
     /** Bearer token for the sync server; blank = signed out. App-private prefs. */
     private val _authToken = MutableStateFlow("")
     val authToken: StateFlow<String> = _authToken
@@ -94,6 +98,7 @@ object Settings {
         _fogRadiusMeters.value = prefs.getFloat("fog_radius_m", FOG_RADIUS_DEFAULT)
         _defaultZoom.value = prefs.getFloat("default_zoom", DEFAULT_ZOOM_DEFAULT)
         _syncUrl.value = prefs.getString("sync_url", "") ?: ""
+        _geocoderUrl.value = prefs.getString("geocoder_url", "") ?: ""
         _authToken.value = prefs.getString("auth_token", "") ?: ""
         _authUsername.value = prefs.getString("auth_username", "") ?: ""
         _vehicleDevices.value = readVehicleDevices()
@@ -187,5 +192,10 @@ object Settings {
     fun setSyncUrl(value: String) {
         _syncUrl.value = value.trim()
         prefs.edit().putString("sync_url", value.trim()).apply()
+    }
+
+    fun setGeocoderUrl(value: String) {
+        _geocoderUrl.value = value.trim()
+        prefs.edit().putString("geocoder_url", value.trim()).apply()
     }
 }
